@@ -59,7 +59,8 @@ def actor(cfg: Config, role: str) -> dict:
             "instanceId": os.environ.get("WEBSITE_INSTANCE_ID", uuid.uuid4().hex)[:32]}
 
 
-def audit_log(cfg: Config, role: str, ops_site: Any = None, prefix: str = "absg-audit-") -> AuditLog:
+def audit_log(cfg: Config, role: str, ops_site: Any = None, prefix: str = "absg-audit-",
+              pending: list[dict] | None = None) -> AuditLog:
     sink = None
     if cfg.audit_to_log:
         audit_logger = logging.getLogger("absg.audit")
@@ -67,7 +68,8 @@ def audit_log(cfg: Config, role: str, ops_site: Any = None, prefix: str = "absg-
     if cfg.storage_backend == "sharepoint":
         from .sharepoint import SharePointAuditBackend
         backend = SharePointAuditBackend(ops_site, cfg.sharepoint_audit_library, cfg.sharepoint_audit_folder,
-                                         prefix=prefix, retention_label=cfg.audit_retention_label)
+                                         prefix=prefix, retention_label=cfg.audit_retention_label,
+                                         pending=pending)
         return AuditLog(actor=actor(cfg, role), sink=sink, backend=backend)
     path = cfg.audit_file if prefix == "absg-audit-" else cfg.audit_file.replace(".jsonl", f".{role}.jsonl")
     return AuditLog(path, actor=actor(cfg, role), sink=sink)
@@ -94,7 +96,7 @@ def build(cfg: Config, role: str = "guard") -> Components:
                                                cfg.sharepoint_owner_map_path).load() or {}
     else:
         state = StateStore(cfg.state_file)
-    audit = audit_log(cfg, role, ops_site)
+    audit = audit_log(cfg, role, ops_site, pending=state.pending_audit)
 
     mailer = Mailer(graph, cfg.mail_sender, cfg.admin_emails, cfg.policy_url,
                     cfg.helpdesk_contact, dry_run=cfg.dry_run, templates=email_templates(cfg, ops_site),

@@ -42,7 +42,9 @@ param(
     [Parameter(Mandatory)][string]$PnPClientId,
     [string]$ParametersFile,
     [string]$ReviewersGroup,
-    [string]$FlowAccount
+    [string]$FlowAccount,
+    # Who may submit sharing requests (an Entra group or user). Default: the site's members group.
+    [string]$RequestersGroup
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -138,18 +140,43 @@ $requestFields = @(
     @{ Name = 'Status'; Type = 'Choice'; Default = 'Submitted'; Choices = @('Submitted', 'In review', 'Approved', 'Registered',
         'Needs criteria', 'Rejected', 'Signing failed', 'Revoke requested', 'Revoked') },
     @{ Name = 'ApprovedBy'; Type = 'Text' }, @{ Name = 'ReviewerComments'; Type = 'Note' },
-    @{ Name = 'SignerComments'; Type = 'Note' }, @{ Name = 'RegisteredEntryHash'; Type = 'Text' }
+    @{ Name = 'SignerComments'; Type = 'Note' }, @{ Name = 'RegisteredEntryHash'; Type = 'Text' },
+    @{ Name = 'RequestedBy'; Type = 'Text' },
+    @{ Name = 'ReviewConfigHash'; Type = 'Text' }, @{ Name = 'ReviewConfigSummary'; Type = 'Note' },
+    @{ Name = 'ReviewConfigCapturedAt'; Type = 'Text' }
     ) + @($criteriaColumns | ForEach-Object { @{ Name = $_; Type = 'Choice'; Choices = $criteria } })
 Add-AbsgList -Title $n.requestsList -Description 'ShareGuard for Agent Builder: requests to share an Agent Builder agent.' `
     -Fields $requestFields -Indexed @('Status', 'PackageId')
 Add-AbsgLibrary $n.signerAuditLibrary "ShareGuard for Agent Builder: the registry signer's hash-chained audit trail."
 
-if ($PSCmdlet.ShouldProcess($n.requestsList, 'Item-level permissions: requesters read and edit their own items')) {
+# Requesters may add requests and read their own, but never edit one: the signer trusts
+# Status, ApprovedBy, the criteria and PolicyJson, so only reviewers and the approval flow
+# may change them. (The signer also checks each request's version history when
+# signerTrustedEditors is set.)
+if ($PSCmdlet.ShouldProcess($n.requestsList, 'Permissions: requesters add and read their own requests, but cannot edit them')) {
     Set-PnPList -Identity $n.requestsList -ReadSecurity 2 -WriteSecurity 2 | Out-Null
+    $submitRole = 'ABSG Submit'
+    if (-not (Get-PnPRoleDefinition -Identity $submitRole -ErrorAction SilentlyContinue)) {
+        Add-PnPRoleDefinition -RoleName $submitRole -Clone 'Read' -Include AddListItems `
+            -Description 'ShareGuard for Agent Builder: create sharing requests and read your own; no edits' | Out-Null
+    }
+    Set-PnPList -Identity $n.requestsList -BreakRoleInheritance -CopyRoleAssignments | Out-Null
+    $members = Get-PnPGroup -AssociatedMemberGroup
+    foreach ($role in @('Edit', 'Contribute')) {
+        Set-PnPListPermission -Identity $n.requestsList -Group $members -RemoveRole $role -ErrorAction SilentlyContinue | Out-Null
+    }
+    Set-PnPListPermission -Identity $n.requestsList -Group $members -AddRole $submitRole | Out-Null
+    if ($RequestersGroup) {
+        Set-PnPListPermission -Identity $n.requestsList -User $RequestersGroup -AddRole $submitRole | Out-Null
+    }
     if ($ReviewersGroup) {
-        Set-PnPList -Identity $n.requestsList -BreakRoleInheritance -CopyRoleAssignments | Out-Null
         Set-PnPListPermission -Identity $n.requestsList -Group $ReviewersGroup -AddRole 'Full Control' | Out-Null
     }
+    if ($FlowAccount) {
+        Set-PnPListPermission -Identity $n.requestsList -User $FlowAccount -AddRole 'Contribute' | Out-Null
+    }
+    Write-Warning ("Check $($n.requestsList) > List settings > Permissions: no one but reviewers, the flow " +
+        "account and site owners may hold Edit, Contribute or Full Control (look for 'Everyone except external users').")
 }
 if ($PSCmdlet.ShouldProcess($n.registryList, 'Read-only for site members')) {
     Set-PnPList -Identity $n.registryList -BreakRoleInheritance -CopyRoleAssignments | Out-Null

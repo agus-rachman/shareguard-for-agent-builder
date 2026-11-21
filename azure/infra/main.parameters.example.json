@@ -134,6 +134,9 @@
     "maxApprovalDays": {
       "value": 365
     },
+    "signerTrustedEditors": {
+      "value": ["svc-absg-flow@contoso.com", "jane.risk@contoso.com"]
+    },
     "notRunningAlertMinutes": {
       "value": 20
     }

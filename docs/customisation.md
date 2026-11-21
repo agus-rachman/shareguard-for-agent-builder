@@ -161,6 +161,7 @@ The criteria reviewers must score before an agent can be shared are yours to def
 - `column`: the column's internal name (letters and digits). `Provision-AbsgSharePoint.ps1` creates it. Columns you remove from the list stay in SharePoint; delete them by hand if you want.
 - `id` and `description`: recorded in the signed registry entry and shown in the audit trail.
 - `maxApprovalDays` (default 365): the longest expiry a reviewer may set.
+- `signerTrustedEditors`: the approval flow account and the reviewers (UPNs or object ids). The signer refuses a request that anyone else edited after submitting it. Leave it empty only if nobody but reviewers can edit the requests list.
 
 Leave `approvalCriteria` empty to use the five defaults shown in the example file. Changing the criteria doesn't affect agents already approved: their signed entries keep the criteria they were approved under.
 

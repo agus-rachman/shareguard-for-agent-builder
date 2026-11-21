@@ -321,3 +321,35 @@ def test_cli_verify_and_history(cfg, tmp_path, capsys):
     assert main(["--audit-history", audit.path, "--event", "block"]) == 0
     out = [l for l in capsys.readouterr().out.splitlines() if l]
     assert len(out) == 1 and _json.loads(out[0])["package"]["id"] == "a"
+
+
+# ---- A cycle that aborts part-way must not orphan its blocks ---------------------
+def test_blocks_survive_a_listing_failure_and_are_released_later(cfg):
+    class FlakyGraph(FakeGraph):
+        def list_agent_builder_packages(self):
+            yield self.packages["a"]
+            raise GraphError(503, "paging failed")
+
+    graph = FlakyGraph([pkg("a", shared=[USER])])
+    guard = Guard(cfg, graph, StateStore(cfg.state_file))
+    with pytest.raises(GraphError):
+        guard.run_cycle()
+    assert graph.calls == [("block", "a")]
+    assert StateStore(cfg.state_file).is_ours("a")
+
+    graph2 = FakeGraph([dict(graph.packages["a"], sharedWithUsersAndGroups=[])])
+    Guard(cfg, graph2, StateStore(cfg.state_file)).run_cycle()
+    assert graph2.calls == [("unblock", "a")]
+
+
+def test_unexpected_error_on_one_package_does_not_abort_the_cycle(cfg):
+    class Graph(FakeGraph):
+        def get_package(self, pid):
+            if pid == "a":
+                raise KeyError("unexpected shape")
+            return super().get_package(pid)
+
+    graph = Graph([pkg("a", shared=[USER]), pkg("b", shared=[USER])])
+    r = Guard(cfg, graph, StateStore(cfg.state_file)).run_cycle()
+    assert r.errors == ["a"] and r.blocked == ["b"]
+    assert StateStore(cfg.state_file).is_ours("b")

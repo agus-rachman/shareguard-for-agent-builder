@@ -85,11 +85,13 @@ Users submit agents for sharing through your governance process, which lives out
 | `baseline` | A normalised snapshot of the approved configuration, plus its hash: knowledge sources and scopes, capabilities, embedded files, actions, worker agents, overrides, and an instructions hash |
 | `policy` | `driftMode` (`baseline` or `policy`), `instructionsChange` (`warn`, `block` or `ignore`), `allowEmbeddedFiles`, `allowUnscoped`, and for policy mode `allowedCapabilities`, `allowedKnowledgeUrlPrefixes` and `allowActions` |
 | `governanceContacts` | Also emailed when this agent is drift-blocked |
-| `signature` | Ed25519 signature over the entry |
+| `signedAt`, `signatureAlgorithm`, `signature` | When the entry was signed, and the Ed25519, ES256 or RS256 signature over everything else |
 
 ### Signed entries
 
 Governance signs each entry with a **private key kept offline**. The daemon has only the **public key** (`registry_public_key_file`). Entries that are unsigned, altered after signing, expired, suspended, or have a `manifestId` mismatch are ignored. A shared agent with such an entry is blocked under the normal no-sharing policy, and the reason is recorded in `approvalStatus`. This means write access to the registry file isn't enough to whitelist an agent.
+
+Putting back an *earlier* signed entry doesn't work either, for example restoring an `approved` entry after it was revoked. The signature on an old entry still verifies, so the guard also records, in its own state, the newest `signedAt` it has seen for each agent. An entry signed before that is rejected: `registry_rollback_rejected` is audited, the admins are alerted, and the agent is treated as unapproved until a current entry is signed. Because of this, keep the guard's state somewhere that registry editors can't write to. When signing by hand, re-sign an entry to change it; never copy back an old file.
 
 ### Governance workflow
 
