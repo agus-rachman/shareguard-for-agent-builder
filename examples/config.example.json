@@ -4,6 +4,7 @@
   "cert_path": "/secrets/absg-guard.pem",
   "cert_thumbprint": "THUMBPRINT_HEX",
   "graph_base": "https://graph.microsoft.com/v1.0",
+  "graph_beta_base": "https://graph.microsoft.com/beta",
   "poll_interval_seconds": 300,
   "state_file": "/data/absg_state.json",
   "audit_file": "/data/absg_audit.jsonl",

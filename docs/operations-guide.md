@@ -29,9 +29,14 @@ How ShareGuard for Agent Builder behaves, how to configure and run it, and how t
 
 The daemon polls the Agent 365 **Package Management API** (Microsoft Graph):
 
-- `GET /copilot/admin/catalog/packages?$filter=platform eq 'Microsoft 365 Copilot Agent Builder'`
-- `GET /copilot/admin/catalog/packages/{id}`: reads `sharedWithUsersAndGroups`, `availableTo`, `isBlocked`
-- `POST /copilot/admin/catalog/packages/{id}/block` and `/unblock`
+| Call | Graph version |
+|---|---|
+| `GET /copilot/admin/catalog/packages?$filter=platform eq 'Microsoft 365 Copilot Agent Builder'` | v1.0 |
+| `GET /copilot/admin/catalog/packages/{id}`: reads `sharedWithUsersAndGroups`, `availableTo`, `isBlocked` | v1.0 |
+| `POST /copilot/admin/catalog/packages/{id}/block` and `/unblock` | beta |
+| `PATCH /copilot/admin/catalog/packages/{id}` (sharing removal) and `POST …/reassign` | beta |
+
+Microsoft documents the write methods (update, block, unblock, reassign) only under `/beta`, as a preview: they can change without notice. ShareGuard sends them to `graph_beta_base` (default `https://graph.microsoft.com/beta`) and everything else to `graph_base` (default v1.0). Microsoft's pages also list only delegated permissions for these methods: see the pilot checklist.
 
 It saves the IDs of agents it blocked to a state file, so it only ever unblocks its own blocks.
 
@@ -310,7 +315,7 @@ These behaviours aren't fully documented. Check each one in a test tenant or wit
 7. **`availableTo` values** for unshared Agent Builder agents (`some` / `none`). Confirm that `all` only appears for org-wide shares.
 8. **Owners and usage fields.** Check whether the package detail exposes owners (set `owner_fields`) and whether `lastUsedDateTime` is populated for Agent Builder agents before turning on `inactivity_days`. Check too whether a deleted (soft-deleted) agent disappears from the package list, which is how ShareGuard confirms a deletion.
 9. **Reassignment.** If you use `reassign_to_manager`, try `POST …/reassign` on a test agent with the guard's identity first.
-10. **API version.** The daemon targets `v1.0`. If your tenant only exposes the endpoints under `/beta`, set `graph_base` to the beta URL, and note that beta isn't supported for production.
+10. **API versions and app-only writes.** Reads (list, get) use v1.0; block, unblock, update and reassign use `/beta`, the only version Microsoft documents them in. Microsoft's pages for these write methods list delegated permissions only, so expect 401 or 403 from the guard's app-only block and unblock calls. Check this first. If they're refused, enforcement can't work app-only until Microsoft adds application support. If your tenant only exposes the reads under `/beta` too, set `graph_base` to the beta URL. Beta isn't supported for production.
 
 ## Known limitation
 

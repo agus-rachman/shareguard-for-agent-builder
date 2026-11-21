@@ -26,12 +26,15 @@ Policy
 
 Microsoft APIs used (Microsoft Graph)
 -------------------------------------
-  GET   /copilot/admin/catalog/packages?$filter=platform eq '...Agent Builder'
-  GET   /copilot/admin/catalog/packages/{id}
-  POST  /copilot/admin/catalog/packages/{id}/block | /unblock   (application)
-  PATCH /copilot/admin/catalog/packages/{id}                    (delegated only)
-  GET   /users/{id}, /directoryObjects/{id}
-  POST  /users/{sender}/sendMail
+  v1.0  GET   /copilot/admin/catalog/packages?$filter=platform eq '...Agent Builder'
+  v1.0  GET   /copilot/admin/catalog/packages/{id}
+  beta  POST  /copilot/admin/catalog/packages/{id}/block | /unblock | /reassign
+  beta  PATCH /copilot/admin/catalog/packages/{id}                    (delegated only)
+  v1.0  GET   /users/{id}, /directoryObjects/{id}
+  v1.0  POST  /users/{sender}/sendMail
+
+The package write methods are documented only under /beta (preview, subject to
+change); graph_beta_base sets where they're sent. Everything else uses graph_base.
 
 Requires a Microsoft Agent 365 licence. See README for the permissions.
 
@@ -76,6 +79,9 @@ class Config:
     cert_path: str | None = None              # PEM with private key
     cert_thumbprint: str | None = None
     graph_base: str = "https://graph.microsoft.com/v1.0"
+    # The Package Management API's write methods (update, block, unblock, reassign)
+    # are documented only under /beta; reads (list, get) stay on graph_base (v1.0).
+    graph_beta_base: str = "https://graph.microsoft.com/beta"
     # Authenticate as an Azure managed identity (client_id = the user-assigned
     # identity's client ID) instead of a client secret or certificate.
     use_managed_identity: bool = False
@@ -221,7 +227,7 @@ class Config:
     # call, verified; falls back to manual), or "none" (archive only, stays blocked).
     deletion_mode: str = "manual"
     deletion_reminder_days: int = 7
-    deletion_api_path: str = "/copilot/admin/catalog/packages/{id}"
+    deletion_api_path: str = "/copilot/admin/catalog/packages/{id}"   # relative = under graph_beta_base
 
     # --- Email ----------------------------------------------------------------
     # Name shown in emails, an optional subject prefix (for example "[IT]"), footer text
@@ -389,14 +395,19 @@ class GraphClient:
     def get_package(self, package_id: str) -> dict:
         return self.request("GET", f"/copilot/admin/catalog/packages/{package_id}").json()
 
+    def beta(self, path: str) -> str:
+        """Full /beta URL for a path (used for methods Microsoft documents only in beta)."""
+        return self.cfg.graph_beta_base.rstrip("/") + path
+
+    # block, unblock, reassign and update are documented only under /beta (preview).
     def block(self, package_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/block")
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/block"))
 
     def unblock(self, package_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/unblock")
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/unblock"))
 
     def reassign(self, package_id: str, user_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/reassign",
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/reassign"),
                      json={"userId": user_id})
 
     def user_status(self, user_id: str) -> str:
@@ -416,7 +427,7 @@ class GraphClient:
     def update_package(self, package_id: str, body: dict) -> None:
         # Delegated permission only (CopilotPackages.ReadWrite.All); call this on
         # a GraphClient built with a delegated token provider.
-        self.request("PATCH", f"/copilot/admin/catalog/packages/{package_id}", json=body)
+        self.request("PATCH", self.beta(f"/copilot/admin/catalog/packages/{package_id}"), json=body)
 
 
 # --------------------------------------------------------------------------
@@ -1738,6 +1749,8 @@ class Guard:
     def _delete_via_api(self, d: dict, entry: dict, result: CycleResult) -> None:
         pid = d["id"]
         url = self.cfg.deletion_api_path.replace("{id}", pid)
+        if not url.startswith("http"):       # undocumented: if it exists, it's beside the beta write methods
+            url = self.cfg.graph_beta_base.rstrip("/") + url
         if self.cfg.dry_run:
             self._audit("deletion_submitted", d, caseId=entry.get("caseId"), method="api", outcome="simulated")
             return
