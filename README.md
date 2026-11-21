@@ -26,7 +26,7 @@ The control that turns Agent Builder on is the same one that lets people use age
 
 That is acceptable, even desirable, if those agents stay personal. Native settings can't guarantee that they do.
 
-### 2. Native sharing controls stop *broad* sharing, but doesn't prevent sharing
+### 2. Native sharing control stop *broad* sharing, but doesn't prevent sharing
 
 Microsoft 365 lets admins restrict who can share Agent Builder agents with **the whole organisation**. Turning that off still leaves direct sharing open: users can still share with specific individuals, and the sharing dialog accepts groups and teams. A group large enough to represent the organisation defeats the restriction, and nothing reviews what was shared.
 
