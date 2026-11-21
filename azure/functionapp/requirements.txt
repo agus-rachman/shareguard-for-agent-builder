@@ -1,0 +1,5 @@
+# Installed by the Functions build (remote build or the package step in deploy.sh).
+azure-functions>=1.21
+msal>=1.29
+requests>=2.31
+cryptography>=42

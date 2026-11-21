@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "ABSG_ROLE": "guard",
+    "ABSG_GUARD_SCHEDULE": "0 */5 * * * *",
+    "ABSG_VERIFY_SCHEDULE": "0 30 2 * * *",
+    "ABSG_SIGNER_SCHEDULE": "0 */15 * * * *",
+    "ABSG_DRY_RUN": "true",
+    "ABSG_CONFIG_JSON": "{\"tenant_id\":\"<tenant-id>\",\"client_id\":\"<client-id>\",\"client_secret\":\"<dev only>\",\"storage_backend\":\"file\"}"
+  }
+}

@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "absg"
+version = "0.1.0"
+description = "ShareGuard for Agent Builder: blocks shared Microsoft 365 Copilot Agent Builder agents unless approved in a signed registry, with drift detection and a tamper-evident audit trail."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "The ShareGuard for Agent Builder Authors" }]
+keywords = ["microsoft-365", "copilot", "agent-builder", "governance", "microsoft-graph", "compliance"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Systems Administration",
+  "Topic :: Security",
+]
+dependencies = [
+  "msal>=1.28",
+  "requests>=2.31",
+  "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6", "build>=1.2", "azure-functions>=1.21"]
+
+[project.scripts]
+absg = "absg.core:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/absg"
+Documentation = "https://github.com/OWNER/absg/tree/main/docs"
+Issues = "https://github.com/OWNER/absg/issues"
+Changelog = "https://github.com/OWNER/absg/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B", "S", "UP"]
+ignore = [
+  "UP006", "UP035",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/absg/mail.py" = ["S608"]  # HTML email templates (values escaped), not SQL
+"tests/*" = ["S101", "S105", "S106", "S108", "S310", "B011"]

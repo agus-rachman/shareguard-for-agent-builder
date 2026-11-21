@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ABSG runtime files: never commit these
+config.json
+*.pem
+*.key
+absg_state.json
+absg_audit.jsonl
+absg_acks.json
+absg_delegated_cache.json
+owners.json
+registry.json
+!examples/*.json
+# registry signing keys exported as JWK
+*.jwk
+*.jwk.json
+registry-private*.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Filled-in Bicep parameters (keep outside the repo)
+azure/infra/*.parameters.json
+!azure/infra/main.parameters.example.json

@@ -1,0 +1,94 @@
+{
+  "agents": [
+    {
+      "packageId": "P_7c1e2d40-hr-policy-helper",
+      "manifestId": "a1b2c3d4-0000-4000-8000-000000000001",
+      "displayName": "HR Policy Helper",
+      "ownerId": "5d9fa31e-626e-45fb-b6e7-d8f1f11933a9",
+      "status": "approved",
+      "approval": {
+        "requestId": "GOV-1042",
+        "approvedBy": "jane.risk@contoso.com",
+        "approvedAt": "2026-11-20T03:15:00+00:00",
+        "expiresAt": "2027-11-20T00:00:00+00:00",
+        "riskRating": "low",
+        "riskScore": 6,
+        "criteria": [
+          {
+            "id": "KS-01",
+            "description": "Knowledge sources limited to approved SharePoint sites",
+            "result": "pass",
+            "evidence": "https://contoso.sharepoint.com/sites/governance/GOV-1042#ks"
+          },
+          {
+            "id": "KS-02",
+            "description": "No embedded knowledge files",
+            "result": "pass",
+            "evidence": "https://contoso.sharepoint.com/sites/governance/GOV-1042#ks"
+          },
+          {
+            "id": "DS-01",
+            "description": "Content sensitivity reviewed; highest label in scope: General",
+            "result": "pass",
+            "evidence": "https://contoso.sharepoint.com/sites/governance/GOV-1042#ds"
+          },
+          {
+            "id": "AU-01",
+            "description": "Audience appropriate for the content (HR staff group)",
+            "result": "pass",
+            "evidence": "https://contoso.sharepoint.com/sites/governance/GOV-1042#au"
+          },
+          {
+            "id": "AC-01",
+            "description": "No actions or plugins that write data",
+            "result": "n/a",
+            "evidence": ""
+          }
+        ],
+        "conditions": [
+          "Re-review if the HR Policies site permissions change"
+        ],
+        "notes": "Approved for the HR Business Partners group only."
+      },
+      "sharing": {
+        "allowedPrincipals": [
+          {
+            "resourceType": "group",
+            "resourceId": "65d7d8fb-1e24-4ba8-92cd-8c502d830113"
+          }
+        ]
+      },
+      "policy": {
+        "driftMode": "baseline",
+        "instructionsChange": "warn",
+        "allowEmbeddedFiles": false,
+        "allowUnscoped": []
+      },
+      "baseline": {
+        "capturedAt": "2026-11-21T04:13:54.460655+00:00",
+        "configHash": "e36809aa9271c9c8a9a8cf2129ed5cf992cce32c12974958665de12909a7a5f4",
+        "profile": {
+          "capabilities": {
+            "OneDriveAndSharePoint": {
+              "urls": [
+                "https://contoso.sharepoint.com/sites/hrpolicies"
+              ],
+              "itemIds": [],
+              "unscoped": false
+            }
+          },
+          "embeddedFiles": [],
+          "actions": [],
+          "workerAgents": [],
+          "userOverrides": null,
+          "behaviorOverrides": null,
+          "instructionsHash": "cd4eebe18efa270c81b7c91471989c3933fd24989ef2bcbc911e6cc88f8eb987"
+        }
+      },
+      "governanceContacts": [
+        "ai-governance@contoso.com"
+      ],
+      "signature": "<added by --registry-sign>"
+    }
+  ]
+}

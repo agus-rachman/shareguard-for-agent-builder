@@ -1,0 +1,141 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "env": {
+      "value": "prod"
+    },
+    "operationsSiteId": {
+      "value": "contoso.sharepoint.com,00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000"
+    },
+    "registrySiteId": {
+      "value": "contoso.sharepoint.com,00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000"
+    },
+    "archiveSiteId": {
+      "value": "contoso.sharepoint.com,00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000"
+    },
+    "mailSender": {
+      "value": "shareguard@contoso.com"
+    },
+    "adminEmails": {
+      "value": [
+        "secops@contoso.com",
+        "ai-governance@contoso.com"
+      ]
+    },
+    "alertEmail": {
+      "value": "secops@contoso.com"
+    },
+    "policyUrl": {
+      "value": "https://contoso.sharepoint.com/sites/intranet/SitePages/Copilot-agent-policy.aspx"
+    },
+    "ackFormUrl": {
+      "value": "https://forms.office.com/Pages/ResponsePage.aspx?id=FORM_ID&rQUESTION_ID={token}"
+    },
+    "delegatedClientId": {
+      "value": "00000000-0000-0000-0000-000000000000"
+    },
+    "delegatedUsername": {
+      "value": "svc-absg@contoso.com"
+    },
+    "dryRun": {
+      "value": true
+    },
+    "auditRetentionLabel": {
+      "value": "ShareGuard audit record"
+    },
+    "deploymentIpRanges": {
+      "value": [
+        "203.0.113.10/32"
+      ]
+    },
+    "adminIpRanges": {
+      "value": []
+    },
+    "initialiseSecrets": {
+      "value": true
+    },
+    "naming": {
+      "value": {
+        "workload": "absg"
+      }
+    },
+    "sharePointNames": {
+      "value": {
+        "archiveLibrary": "Retired Agents",
+        "templatesFolder": "templates"
+      }
+    },
+    "guardSchedule": {
+      "value": "0 */5 * * * *"
+    },
+    "signerSchedule": {
+      "value": "0 */15 * * * *"
+    },
+    "auditCheckSchedule": {
+      "value": "0 30 2 * * *"
+    },
+    "lifecycle": {
+      "value": {
+        "owner_status_checks": true,
+        "ownerless_action": "report",
+        "inactivity_days": 90,
+        "inactivity_notice_days": 30,
+        "inactivity_reminder_days": 7,
+        "archive_after_days": 30,
+        "archive_retention_label": "ShareGuard retired agent",
+        "deletion_mode": "manual",
+        "deletion_reminder_days": 7
+      }
+    },
+    "email": {
+      "value": {
+        "email_brand_name": "ShareGuard for Agent Builder",
+        "email_subject_prefix": "",
+        "email_button_colour": "#0f6cbd"
+      }
+    },
+    "guardSettings": {
+      "value": {
+        "owner_fields": [],
+        "max_blocks_per_cycle": 25,
+        "exempt_ids": []
+      }
+    },
+    "approvalCriteria": {
+      "value": [
+        {
+          "column": "KS01",
+          "id": "KS-01",
+          "description": "Knowledge sources limited to approved SharePoint sites"
+        },
+        {
+          "column": "KS02",
+          "id": "KS-02",
+          "description": "No embedded knowledge files"
+        },
+        {
+          "column": "DS01",
+          "id": "DS-01",
+          "description": "Content sensitivity reviewed; highest label in scope"
+        },
+        {
+          "column": "AU01",
+          "id": "AU-01",
+          "description": "Audience appropriate for the content"
+        },
+        {
+          "column": "AC01",
+          "id": "AC-01",
+          "description": "No actions or plugins that write data"
+        }
+      ]
+    },
+    "maxApprovalDays": {
+      "value": 365
+    },
+    "notRunningAlertMinutes": {
+      "value": 20
+    }
+  }
+}

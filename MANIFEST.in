@@ -1,0 +1,6 @@
+include LICENSE NOTICE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+recursive-include docs *.md
+recursive-include examples *.json
+recursive-include tests *.py
+recursive-include azure *.py *.json *.bicep *.ps1 *.sh *.txt .funcignore
+prune azure/functionapp/__pycache__
