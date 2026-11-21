@@ -141,7 +141,9 @@ $requestFields = @(
         'Needs criteria', 'Rejected', 'Signing failed', 'Revoke requested', 'Revoked') },
     @{ Name = 'ApprovedBy'; Type = 'Text' }, @{ Name = 'ReviewerComments'; Type = 'Note' },
     @{ Name = 'SignerComments'; Type = 'Note' }, @{ Name = 'RegisteredEntryHash'; Type = 'Text' },
-    @{ Name = 'RequestedBy'; Type = 'Text' }
+    @{ Name = 'RequestedBy'; Type = 'Text' },
+    @{ Name = 'ReviewConfigHash'; Type = 'Text' }, @{ Name = 'ReviewConfigSummary'; Type = 'Note' },
+    @{ Name = 'ReviewConfigCapturedAt'; Type = 'Text' }
     ) + @($criteriaColumns | ForEach-Object { @{ Name = $_; Type = 'Choice'; Choices = $criteria } })
 Add-AbsgList -Title $n.requestsList -Description 'ShareGuard for Agent Builder: requests to share an Agent Builder agent.' `
     -Fields $requestFields -Indexed @('Status', 'PackageId')

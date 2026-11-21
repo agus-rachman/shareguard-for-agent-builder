@@ -25,8 +25,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .core import Config, GraphError, sharing_recipients
-from .registry import (attach_signature, draft_entry, entry_owners, sha256, signing_payload,
-                       verify_entry)
+from .registry import (attach_signature, build_profile, draft_entry, entry_owners, profile_summary, sha256,
+                       signing_payload, verify_entry)
 
 log = logging.getLogger("absg.signer")
 
@@ -55,9 +55,13 @@ def _split(text: Any) -> list[str]:
 
 
 class RequestProblem(ValueError):
-    def __init__(self, problems: list[str]):
+    def __init__(self, problems: list[str], fields: dict | None = None):
         super().__init__("; ".join(problems))
         self.problems = problems
+        self.fields = fields or {}      # also written to the request (e.g. a fresh review snapshot)
+
+
+REVIEW_STATUSES = ("Submitted", "In review")
 
 
 class RegistrySigner:
@@ -136,6 +140,35 @@ class RegistrySigner:
                                 f"{name.get('email') or name.get('displayName') or name.get('id') or 'unknown'}, "
                                 "who isn't a reviewer or the approval flow")
         return problems
+
+    def _snapshot_fields(self, detail: dict) -> dict:
+        """What reviewers are approving: the agent's configuration while the request is in review."""
+        profile = build_profile(detail, self.cfg.embedded_capability_names)
+        return {"ReviewConfigHash": sha256(profile) if profile is not None else "",
+                "ReviewConfigSummary": profile_summary(profile),
+                "ReviewConfigCapturedAt": datetime.now(timezone.utc).isoformat()}
+
+    def capture_review_snapshot(self, item: dict) -> bool:
+        """Record the agent's configuration on a request under review (once).
+
+        The signer later refuses to register the agent unless its configuration still
+        matches, so the baseline is what reviewers saw, not whatever the owner changed
+        between the review and the next signer run."""
+        f = item.get("fields") or {}
+        pid = (f.get("PackageId") or "").strip()
+        if not pid or f.get("ReviewConfigCapturedAt"):
+            return False
+        try:
+            detail = self.graph.get_package(pid)
+        except GraphError:
+            return False                        # reported when it's approved
+        fields = self._snapshot_fields(detail)
+        if not self.cfg.dry_run:
+            self.site.update_fields(self.cfg.sharepoint_requests_list, item["id"], fields)
+        self._record("review_snapshot_captured", package={"id": pid}, requestId=f"REQ-{item['id']}",
+                     configHash=fields["ReviewConfigHash"],
+                     outcome="simulated" if self.cfg.dry_run else "success")
+        return True
 
     def _mark(self, item: dict, status: str, **fields: Any) -> None:
         self.site.update_fields(self.cfg.sharepoint_requests_list, item["id"], {"Status": status, **fields})
@@ -225,8 +258,25 @@ class RegistrySigner:
                     problems.append(f"PolicyJson has unknown keys: {', '.join(sorted(unknown))}")
             except json.JSONDecodeError:
                 problems.append("PolicyJson is not valid JSON")
+        profile = build_profile(detail, self.cfg.embedded_capability_names)
+        if profile is None:
+            problems.append("the agent's definition couldn't be read, so there is no baseline to approve")
+        elif "KS-02" in {c["id"] for c in criteria if c["result"] == "pass"} and profile["embeddedFiles"]:
+            problems.append("KS-02 is marked Pass, but the agent has embedded knowledge files: "
+                            + ", ".join(profile["embeddedFiles"]))
+        snapshot = {}
+        reviewed = f.get("ReviewConfigHash")
+        if not f.get("ReviewConfigCapturedAt"):
+            problems.append("the agent's configuration wasn't recorded while the request was in review; "
+                            "it has been now (ReviewConfigSummary): review it and approve again")
+            snapshot = self._snapshot_fields(detail)
+        elif profile is not None and reviewed != sha256(profile):
+            problems.append("the agent changed after the review started (it no longer matches "
+                            "ReviewConfigHash): review the new configuration in ReviewConfigSummary "
+                            "and approve again")
+            snapshot = self._snapshot_fields(detail)
         if problems:
-            raise RequestProblem(problems)
+            raise RequestProblem(problems, fields=snapshot)
 
         entry = draft_entry(detail, owners, audience, self.cfg.embedded_capability_names)
         entry["approval"] = {
@@ -246,15 +296,24 @@ class RegistrySigner:
         entry["governanceContacts"] = _split(f.get("GovernanceContacts"))
         live = sharing_recipients(detail, self.cfg)
         entry["baseline"]["sharedWithAtApproval"] = live
+        entry["baseline"]["reviewSnapshotAt"] = f.get("ReviewConfigCapturedAt")
         return entry
 
     # -- cycle --------------------------------------------------------------------
     def run(self) -> dict:
         done = {"registered": [], "revoked": [], "needsCriteria": [], "failed": []}
-        flt = "fields/Status eq 'Approved' or fields/Status eq 'Revoke requested'"
+        done["reviewSnapshots"] = []
+        flt = " or ".join(f"fields/Status eq '{st}'" for st in ("Approved", "Revoke requested", *REVIEW_STATUSES))
         for item in list(self.site.list_items(self.cfg.sharepoint_requests_list, flt)):
             f = item.get("fields") or {}
             pid = f.get("PackageId")
+            if f.get("Status") in REVIEW_STATUSES:
+                try:
+                    if self.capture_review_snapshot(item):
+                        done["reviewSnapshots"].append(pid)
+                except Exception:
+                    log.exception("Recording the review snapshot of request %s failed", item.get("id"))
+                continue
             try:
                 if f.get("Status") == "Revoke requested":
                     self._revoke(item)
@@ -279,7 +338,8 @@ class RegistrySigner:
                 done["registered"].append(pid)
             except RequestProblem as exc:
                 if not self.cfg.dry_run:
-                    self._mark(item, "Needs criteria", SignerComments="Not registered: " + "; ".join(exc.problems))
+                    self._mark(item, "Needs criteria", SignerComments="Not registered: " + "; ".join(exc.problems),
+                               **exc.fields)
                 self._record("registry_request_refused", package={"id": pid}, requestId=f"REQ-{item['id']}",
                              problems=exc.problems)
                 done["needsCriteria"].append(pid)

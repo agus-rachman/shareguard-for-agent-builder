@@ -404,3 +404,70 @@ def test_graph_user_status_and_reassign_calls():
     assert s.calls[-1] == ("POST", "https://graph.microsoft.com/v1.0/copilot/admin/catalog/packages/P1/reassign",
                            {"userId": "m1"})
     _ = (GraphError, Resp)
+
+
+# ---- lifting a lifecycle block never unblocks a shared, unapproved agent -----------
+def test_ownerless_block_lifted_while_shared_stays_blocked_for_sharing(env):
+    guard, tenant, audit, _ = env([agent("a")], ownerless_action="block")
+    tenant.status[OWNER] = "disabled"
+    guard.run_cycle()
+    tenant.packages["a"]["sharedWithUsersAndGroups"] = SHARE        # shared while blocked
+    tenant.packages["a"]["owners"] = [CO]                           # admin assigns an active owner
+    guard.run_cycle()
+    assert ("unblock", "a") not in tenant.calls
+    (rec,) = records(audit, "block_reason_changed")
+    assert rec["previousBlockType"] == "ownerless" and rec["blockType"] == "sharing"
+    assert guard.state.data["a"]["blockType"] == "sharing" and guard.state.data["a"]["caseId"] == rec["caseId"]
+    notice = [m for m in tenant.mails_to("noah@contoso.com") if "blocked" in m["subject"]]
+    assert len(notice) == 1
+    tenant.packages["a"]["sharedWithUsersAndGroups"] = []           # sharing removed: released
+    guard.run_cycle()
+    assert ("unblock", "a") in tenant.calls
+
+
+def test_reactivating_a_shared_retired_agent_keeps_it_blocked(env):
+    guard, tenant, audit, acks = env([agent("a", last_used=ago(70))], inactivity_days=90)
+    guard.run_cycle()
+    shift(guard, "a", 31)
+    guard.run_cycle()
+    assert guard.state.data["a"]["blockType"] == "retired"
+    retired = [m for m in tenant.mails_to("olivia@contoso.com") if m["subject"].endswith("has been retired")][0]
+    tenant.packages["a"]["sharedWithUsersAndGroups"] = SHARE        # shared while retired
+    claims = AckTokenSigner(SECRET).verify(ack_token_from(retired))
+    acks.submit({"caseId": claims.case_id, "packageId": "a", "ownerId": OWNER, "tokenId": claims.token_id})
+    guard.run_cycle()
+    assert ("unblock", "a") not in tenant.calls
+    entry = guard.state.data["a"]
+    assert entry["blockType"] == "sharing" and "archiveOn" not in entry and entry["caseId"] != claims.case_id
+    assert records(audit, "reactivation_requested") and records(audit, "block_reason_changed")
+    assert "reactivatedAt" in guard.state.lifecycle["a"]
+    share_notice = [m for m in tenant.mails_to("olivia@contoso.com")
+                    if "blocked" in m["subject"] and not m["subject"].endswith("has been retired")]
+    assert share_notice
+    # The new notice's link removes the sharing on the owner's behalf, then unblocks.
+    claims2 = AckTokenSigner(SECRET).verify(ack_token_from(share_notice[-1]))
+    assert claims2.case_id == entry["caseId"]
+    acks.submit({"caseId": claims2.case_id, "packageId": "a", "ownerId": OWNER, "tokenId": claims2.token_id})
+    guard.run_cycle()
+    assert tenant.patches and ("unblock", "a") in tenant.calls
+
+
+def test_ownerless_block_lifted_on_an_approved_compliant_agent_unblocks_it(env, tmp_path):
+    from absg.registry import Registry
+    priv, pub = generate_keypair()
+    d = agent("a", owners=(OWNER,))
+    guard, tenant, audit, _ = env([d], ownerless_action="block")
+    tenant.status[OWNER] = "disabled"
+    guard.run_cycle()
+    assert guard.state.data["a"]["blockType"] == "ownerless"
+
+    tenant.packages["a"]["sharedWithUsersAndGroups"] = SHARE
+    entry = sign_entry({**draft_entry(tenant.packages["a"], [OWNER, CO], SHARE),
+                        "approval": {"requestId": "REQ-1", "expiresAt": "2099-01-01"}}, priv)
+    (tmp_path / "reg.json").write_text(json.dumps({"agents": [entry]}))
+    (tmp_path / "pub.pem").write_bytes(pub)
+    guard.registry = Registry(str(tmp_path / "reg.json"), str(tmp_path / "pub.pem"))
+    tenant.status[OWNER] = "active"
+    guard.run_cycle()
+    assert ("unblock", "a") in tenant.calls
+    assert records(audit, "unblock")[-1]["reason"] == "agent approved in the registry"

@@ -138,6 +138,33 @@ def build_profile(detail: dict,
     }
 
 
+def profile_summary(profile: dict | None, limit: int = 4000) -> str:
+    """A plain-text summary of a configuration profile, for reviewers."""
+    if profile is None:
+        return "The agent's definition couldn't be read."
+    caps = profile.get("capabilities") or {}
+    lines = []
+    for name in sorted(caps):
+        scope = caps[name] or {}
+        where = scope.get("urls") or scope.get("sites") or scope.get("connections") or scope.get("folders")
+        if scope.get("unscoped"):
+            lines.append(f"- {name}: unscoped (everything the user can access)")
+        elif where:
+            lines.append(f"- {name}: " + ", ".join(where))
+        elif scope.get("itemIds"):
+            lines.append(f"- {name}: {len(scope['itemIds'])} selected item(s)")
+        else:
+            lines.append(f"- {name}")
+    out = ["Capabilities and knowledge:", *(lines or ["- none"]),
+           "Embedded files: " + (", ".join(profile.get("embeddedFiles") or []) or "none"),
+           "Actions: " + (", ".join(profile.get("actions") or []) or "none"),
+           f"Worker agents: {len(profile.get('workerAgents') or [])}",
+           f"Instructions hash: {str(profile.get('instructionsHash', ''))[:12]}",
+           f"Configuration hash: {sha256(profile)[:12]}"]
+    text = "\n".join(out)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 # --------------------------------------------------------------------------
 # Registry entries and signatures
 # --------------------------------------------------------------------------

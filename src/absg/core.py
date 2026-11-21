@@ -768,6 +768,8 @@ class Guard:
         self._cycle_id: str | None = None
         self._baselined = 0
         self._status_cache: dict[str, str] = {}
+        # packageId -> new case ID, for a reactivated agent kept blocked because it's shared
+        self._held: dict[str, str] = {}
 
     # -- audit helper -------------------------------------------------------
     def _audit(self, event: str, d: dict | None = None, **fields: Any) -> None:
@@ -982,7 +984,6 @@ class Guard:
         before = self._snapshot(blocked, recipients)
 
         owners, owner_source = self._owners(d, shared)
-        owner = owners[0] if owners else None
         for o in owners:
             self._maybe_welcome(d, o, result)
 
@@ -996,9 +997,26 @@ class Guard:
 
         lifecycle_block = self.state.data.get(pid, {}).get("blockType") if ours else None
         if blocked and lifecycle_block in ("retired", "ownerless"):
-            self._reconcile_lifecycle_block(d, lifecycle_block, owners, recipients, result)
-            return 0
+            held = self._reconcile_lifecycle_block(d, lifecycle_block, owners, recipients, result)
+            if held is None:
+                return 0
+            # The lifecycle reason is gone, but the agent is shared: the normal policy
+            # decides now (an approved, compliant agent is unblocked; otherwise it stays
+            # blocked and the owners get the notice for the new case).
+            issued = self._reconcile_sharing(d, result, new_blocks, recipients, before, blocked, ours,
+                                             owners, owner_source)
+            self._notify_if_still_held(d, held, owners, recipients)
+            return issued
 
+        return self._reconcile_sharing(d, result, new_blocks, recipients, before, blocked, ours,
+                                       owners, owner_source)
+
+    def _reconcile_sharing(self, d: dict, result: CycleResult, new_blocks: int, recipients: list[dict],
+                           before: dict, blocked: bool, ours: bool, owners: list[str],
+                           owner_source: str | None) -> int:
+        pid = d["id"]
+        shared = bool(recipients)
+        owner = owners[0] if owners else None
         if shared and self.registry is not None and not self.registry.loaded:
             # Without any copy of the registry, approved agents can't be told apart from
             # unapproved ones: blocking them all would be a mass block. Decide next cycle.
@@ -1778,28 +1796,76 @@ class Guard:
         self.notify("deleted", {"packageId": pid, "displayName": entry.get("displayName"),
                                 "archive": entry.get("archiveReference")})
 
+    # State keys that only make sense while an agent is retired.
+    _RETIREMENT_KEYS = ("retiredAt", "lastActivity", "archiveOn", "archivedAt", "archiveReference",
+                        "archiveLocation", "archiveFailedAt", "deletionRequestedAt", "deletionReminderAt",
+                        "deletionSubmittedAt", "deletionApiFailed")
+
     def _reconcile_lifecycle_block(self, d: dict, block_type: str, owners: list[str],
-                                   recipients: list[dict], result: CycleResult) -> None:
-        """A retired or ownerless agent this guard blocked: release it when that's allowed."""
+                                   recipients: list[dict], result: CycleResult) -> str | None:
+        """A retired or ownerless agent this guard blocked: release it when that's allowed.
+
+        Returns the new case ID when the lifecycle reason is gone but the agent is still
+        shared, so it's now held under the sharing policy instead; otherwise None."""
         entry = self.state.data.get(d["id"], {})
         if block_type == "ownerless":
             active = [o for o in owners if self._status(o) == "active"]
             if active:
                 if self.state.is_ours(d["id"]):
                     entry["ownerId"] = active[0]
-                self._unblock(d, result, recipients, reason="an active owner is assigned again")
-            return
+                reason = "an active owner is assigned again"
+                if recipients:
+                    return self._hold_for_sharing(d, owners, recipients, reason)
+                self._unblock(d, result, recipients, reason=reason)
+            return None
         self._process_acks(d, recipients, result)          # reactivation requests
+        held = self._held.pop(d["id"], None)
+        if held:
+            return held
         if self.state.is_ours(d["id"]) and self.state.data[d["id"]].get("blockType") == "retired":
             self._retirement_progress(d, self.state.data[d["id"]], owners, result)
+        return None
+
+    def _hold_for_sharing(self, d: dict, owners: list[str], recipients: list[dict], reason: str,
+                          on_behalf_of: str | None = None) -> str:
+        """Keep a lifecycle-blocked agent blocked because it's shared: the block becomes a
+        sharing block with a new case, and the usual policy takes it from here."""
+        pid = d["id"]
+        entry = self.state.data[pid]
+        previous_case, previous_type = entry.get("caseId"), entry.get("blockType")
+        case_id = uuid.uuid4().hex
+        for k in self._RETIREMENT_KEYS:
+            entry.pop(k, None)
+        entry.update({"blockType": "sharing", "caseId": case_id, "sharedWith": recipients,
+                      "violations": None, "violationsFingerprint": None, "ackTokenId": None,
+                      "ownerIds": owners or entry.get("ownerIds"),
+                      "ownerId": entry.get("ownerId") or (owners[0] if owners else None)})
+        self._audit("block_reason_changed", d, caseId=case_id, previousCaseId=previous_case,
+                    previousBlockType=previous_type, blockType="sharing", recipients=recipients,
+                    onBehalfOf=on_behalf_of,
+                    reason=f"{reason}, but the agent is shared: it stays blocked under the sharing policy")
+        return case_id
+
+    def _notify_if_still_held(self, d: dict, case_id: str, owners: list[str], recipients: list[dict]) -> None:
+        entry = self.state.data.get(d["id"])
+        if not entry or entry.get("caseId") != case_id:
+            return                              # released (e.g. approved and compliant)
+        approval = self.registry.lookup(d) if self.registry else None
+        self._send_notice(d, owners or entry.get("ownerIds") or entry.get("ownerId"), recipients, case_id,
+                          entry.get("blockType") or "sharing", entry.get("violations"),
+                          approval.entry if approval is not None and approval.valid else None)
 
     def _reactivate(self, d: dict, ack: dict, recipients: list[dict], result: CycleResult) -> None:
         pid, case_id = d["id"], ack["caseId"]
         entry = dict(self.state.data.get(pid, {}))
         self._audit("reactivation_requested", d, caseId=case_id, ownerId=ack["ownerId"],
                     ackTokenId=ack.get("tokenId"), ackReceivedAt=ack.get("receivedAt"))
-        self._unblock(d, result, recipients, case_id=case_id, on_behalf_of=ack["ownerId"],
-                      reason="owner reactivated a retired agent")
+        reason = "owner reactivated a retired agent"
+        if recipients:
+            # Reactivation lifts the retirement, not the no-sharing policy.
+            self._held[pid] = self._hold_for_sharing(d, [], recipients, reason, on_behalf_of=ack["ownerId"])
+        else:
+            self._unblock(d, result, recipients, case_id=case_id, on_behalf_of=ack["ownerId"], reason=reason)
         if not self.cfg.dry_run:
             lc = self.state.lifecycle.setdefault(pid, {})
             lc.update({"reactivatedAt": datetime.now(timezone.utc).isoformat()})
