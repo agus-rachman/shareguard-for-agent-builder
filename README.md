@@ -115,7 +115,7 @@ ShareGuard enforces your policy; it doesn't invent it. Before a pilot, agree the
 
 - A Microsoft 365 tenant with **Microsoft Agent 365** licensing (the Package Management API requires it).
 - An Entra app registration (or managed identity) with `CopilotPackages.ReadWrite.All`. Email features also need `Mail.Send` (scope it to one mailbox) and `User.Read.All`.
-- Optional: a delegated service account for removing sharing on an owner's behalf, because Microsoft documents that API as delegated-only.
+- A delegated service account to block, unblock and remove sharing, because Microsoft documents those APIs with delegated permissions only. Without it, ShareGuard falls back to app-only calls, which Microsoft may refuse.
 - Python 3.10 or later, or the Azure deployment (Azure Functions, Python 3.11).
 
 [docs/operations-guide.md](docs/operations-guide.md#prerequisites) lists every permission and why it's needed.

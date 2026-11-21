@@ -32,7 +32,7 @@ All of these names, and those of the Azure resources, can be changed in the para
 - Azure CLI with Bicep; PowerShell 7 with `Microsoft.Graph`, `ExchangeOnlineManagement` and `PnP.PowerShell` (and a PnP app registration for `-PnPClientId`).
 - Roles: Owner on the resource group; Privileged Role Administrator (Graph app roles); SharePoint Administrator; Exchange Administrator.
 - A Microsoft Agent 365 licence in the tenant (the Package Management API needs it).
-- Two empty SharePoint sites (three with a separate archive site), a shared mailbox address and a cloud-only service account (`svc-absg@`) for sharing removal.
+- Two empty SharePoint sites (three with a separate archive site), a shared mailbox address and a cloud-only service account (`svc-absg@`) that blocks, unblocks and removes sharing.
 
 Start by copying `azure/infra/main.parameters.example.json` to a file **outside** the repository, for example `~/absg/main.parameters.prod.json`, and filling in what you know so far: names (`naming`, `sharePointNames`), lifecycle, email and criteria. Every step below reads it.
 
@@ -78,9 +78,9 @@ $o = Get-Content build/outputs.json | ConvertFrom-Json
 
 Restart both apps afterwards so they pick up tokens with the new roles.
 
-## Step 4: Sharing removal account
+## Step 4: Delegated account (blocking and sharing removal)
 
-Microsoft documents removing sharing (`PATCH` on a package) as delegated-only, so it runs as `svc-absg@`.
+Microsoft documents blocking, unblocking and removing sharing (`PATCH` on a package) with delegated permissions only, so ShareGuard runs them as `svc-absg@` (`block_identity: "delegated"`, the default). Until this account is signed in, the guard can detect shared agents but can't block them.
 
 ```powershell
 ./azure/scripts/Register-AbsgDelegatedClient.ps1 -ParametersFile $p   # account from delegatedUsername
@@ -102,7 +102,7 @@ shred -u absg_delegated_cache.json
  "delegated_token_cache": "absg_delegated_cache.json"}
 ``` Key Vault is private, so run `az keyvault secret set` from inside the VNet, or add your IP to the vault firewall temporarily. Then:
 
-- give `svc-absg@` the least-privileged admin role that can manage agents in your pilot;
+- give `svc-absg@` the least-privileged admin role that can block, unblock and update agents in your pilot (try a block by hand with it first);
 - add a Conditional Access policy allowing it to sign in **only** from the NAT IP (`natPublicIp`), and alert on any other sign-in.
 
 When the refresh token expires (sign-in frequency, password reset, revocation), sharing removal fails, admins are told, and the agent stays blocked. Repeat the sign-in to restore it.
@@ -142,7 +142,7 @@ Nobody edits *Approved Agents* by hand. An edited entry fails signature verifica
 
 Run with `dryRun: true` for at least two weeks. Everything is audited as `simulated` and no email is sent. Check, in this order:
 
-1. **App-only tokens.** Microsoft lists application permissions for the Package Management API, but at least one tenant has reported the endpoints rejecting app-only tokens. Look for 401 or 403 errors in the guard's first cycles. If you see them, you'll need the delegated account for every call (raise an issue: this deployment doesn't support that yet).
+1. **App-only reads, delegated writes.** The guard lists and reads agents with its managed identity, and blocks, unblocks and removes sharing as `svc-absg@`. Look for 401 or 403 errors in the guard's first cycles: on a read, the managed identity lacks a role or the API refuses app-only reads; on a block or unblock, `svc-absg@`'s sign-in or admin role is the problem (an `enforcement_identity_failed` record and an admin alert say so).
 2. **Agent 365 licence for the identities.** Microsoft documents the API as requiring an Agent 365 licence. We expect it's a tenant-level requirement, but if calls fail with a licensing error, assign a licence to the identities' service principals (or the service account) and retry.
 3. The [pilot checklist](operations-guide.md#validate-in-a-pilot-before-enforcing) in the operations guide: owner fields, sharing fields, `PATCH` behaviour, `lastUsedDateTime`, propagation delay.
 4. `absg --verify-audit-store` (or the nightly `verify_audit_chain` function) reports an intact chain.

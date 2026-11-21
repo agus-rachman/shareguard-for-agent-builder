@@ -147,6 +147,11 @@ class Config:
     delegated_token_cache: str = "absg_delegated_cache.json"  # noqa: S105 - a file path, not a secret
     delegated_username: str | None = None     # service account UPN
     removal_available_to_value: str = "allowedForSome"
+    # Who calls block and unblock. Microsoft documents those methods with delegated
+    # permissions only, so by default they run as the delegated account above:
+    # "delegated" (falls back to the application, with a warning, when no delegated
+    # client is configured) or "application" (only if your tenant accepts app-only calls).
+    block_identity: str = "delegated"
 
     # --- Approved-agent registry and drift detection --------------------
     registry_file: str | None = None          # signed whitelist maintained by governance
@@ -293,6 +298,8 @@ class Config:
             raise ValueError("inactivity_reminder_days must be 0 or less than inactivity_notice_days")
         if cfg.archive_after_days is not None and cfg.archive_after_days < 0:
             raise ValueError("archive_after_days must be 0 or more (or null to never archive)")
+        if cfg.block_identity not in ("delegated", "application"):
+            raise ValueError("block_identity must be delegated or application")
         if cfg.deletion_mode not in ("manual", "api", "none"):
             raise ValueError("deletion_mode must be manual, api or none")
         for c in cfg.approval_criteria or []:
@@ -770,6 +777,17 @@ class Guard:
         self.signer = signer
         self.acks = acks
         self.delegated = delegated_graph
+        # The identity that blocks and unblocks (see Config.block_identity).
+        self.blocker: Any = graph
+        self.blocker_identity = "application"
+        if cfg.block_identity == "delegated":
+            if delegated_graph is not None:
+                self.blocker = delegated_graph
+                self.blocker_identity = cfg.delegated_username or "delegated"
+            else:
+                log.warning("block_identity is delegated, but no delegated client is configured: "
+                            "blocking and unblocking as the application, which Microsoft may refuse")
+        self._write_auth_alerted = False
         self.registry = registry
         if archive is None and self._archiving:
             from .archive import FileArchiveStore
@@ -817,6 +835,7 @@ class Guard:
         self._baselined = 0
         self._status_cache = {}
         self._cycle_id = uuid.uuid4().hex
+        self._write_auth_alerted = False
         try:
             return self._run_cycle(result, seen, new_blocks)
         finally:
@@ -854,6 +873,7 @@ class Guard:
             "exemptIds": self.cfg.exempt_ids,
             "ignorePrincipalIds": self.cfg.ignore_principal_ids,
             "treatAvailableToAllAsShared": self.cfg.treat_available_to_all_as_shared,
+            "blockIdentity": self.blocker_identity,
         })
 
         try:
@@ -1258,12 +1278,14 @@ class Guard:
         log.warning("%s %s (%s) [%s]: %s", event.upper(), pid, name, block_type, reason)
         if not self.cfg.dry_run:
             try:
-                self.graph.block(pid)
+                self.blocker.block(pid)
             except GraphError as exc:
                 log.error("Block failed for %s: %s", pid, exc)
                 self._audit(event, d, before=before, after=before, recipients=recipients,
                             blockType=block_type, violations=violations, reason=reason,
-                            caseId=case_id, outcome="failed", error=str(exc))
+                            caseId=case_id, outcome="failed", error=str(exc),
+                            actingIdentity=self.blocker_identity)
+                self._alert_write_auth(d, exc)
                 result.errors.append(pid)
                 return 0
             self.state.record_block(pid, {
@@ -1288,6 +1310,7 @@ class Guard:
                     blockType=block_type, violations=violations, approvalRef=approval_ref,
                     approvalStatus=approval_status,
                     configHash=evaluation.config_hash if evaluation else None,
+                    actingIdentity=self.blocker_identity,
                     outcome="simulated" if self.cfg.dry_run else "success", **(extra or {}))
         (result.reblocked if ours else result.blocked).append(pid)
         if block_type == "drift":
@@ -1300,6 +1323,24 @@ class Guard:
                                 "caseId": case_id, "dryRun": self.cfg.dry_run})
         self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
         return 1
+
+    def _alert_write_auth(self, d: dict, exc: GraphError) -> None:
+        """Once a cycle: the blocking identity was refused (sign-in expired, missing role,
+        or app-only refused), so enforcement isn't working. Tell the admins."""
+        if exc.status not in (401, 403) or self._write_auth_alerted:
+            return
+        self._write_auth_alerted = True
+        delegated = self.blocker is self.delegated and self.delegated is not None
+        self._audit("enforcement_identity_failed", d, actingIdentity=self.blocker_identity,
+                    status=exc.status, error=str(exc)[:500],
+                    reason="block or unblock refused: agents can't be blocked or released until this is fixed")
+        self.notify("enforcement_identity_failed", {"identity": self.blocker_identity, "status": exc.status})
+        self._admin_alert(d, None, "ShareGuard can't block or unblock agents", {
+            "Identity": self.blocker_identity, "Error": str(exc)[:300],
+            "Next step": ("Sign the delegated account in again (absg --login-delegated) and check it still "
+                          "holds an admin role that can block agents" if delegated else
+                          "Microsoft may not accept app-only block and unblock calls: configure the delegated "
+                          "account and set block_identity to delegated")})
 
     # -- notice email -------------------------------------------------------
     def _send_notice(self, d: dict, owners: list[str] | str | None, recipients: list[dict],
@@ -1914,19 +1955,20 @@ class Guard:
         log.info("UNBLOCK %s (%s): %s", pid, name, reason)
         if not self.cfg.dry_run:
             try:
-                self.graph.unblock(pid)
+                self.blocker.unblock(pid)
             except GraphError as exc:
                 log.error("Unblock failed for %s: %s", pid, exc)
                 self._audit("unblock", d, before=before, after=before, reason=reason,
                             caseId=case_id, onBehalfOf=on_behalf_of,
-                            outcome="failed", error=str(exc))
+                            outcome="failed", error=str(exc), actingIdentity=self.blocker_identity)
+                self._alert_write_auth(d, exc)
                 result.errors.append(pid)
                 return
             self.state.forget(pid)
         self._audit("unblock", d, before=before,
                     after=self._snapshot(self.cfg.dry_run, recipients),
                     reason=reason, caseId=case_id, onBehalfOf=on_behalf_of,
-                    originallyBlockedAt=blocked_at,
+                    originallyBlockedAt=blocked_at, actingIdentity=self.blocker_identity,
                     outcome="simulated" if self.cfg.dry_run else "success")
         result.unblocked.append(pid)
         self.notify("unblocked", {"packageId": pid, "displayName": name, "caseId": case_id,

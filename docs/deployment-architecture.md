@@ -14,7 +14,7 @@ Key decisions:
 - **Notifications: a shared mailbox in Exchange Online.** Graph `Mail.Send` is restricted to that one mailbox with RBAC for Applications.
 - **Owner acknowledgement: a Microsoft Form plus a Power Automate flow.** This replaces the built-in web endpoint. Forms records the responder's identity, so no reverse proxy or public URL is needed.
 - **Registry signing: a Key Vault HSM key, used by a separate signer function.** Key Vault doesn't support Ed25519, so in this deployment the signature scheme moves to ECDSA P-256 (ES256). The guard holds only the public key.
-- **Delegated sharing removal: a dedicated service account.** Its refresh token is kept in Key Vault, and Conditional Access confines its sign-ins to the function's fixed outbound IP address.
+- **Delegated blocking and sharing removal: a dedicated service account.** Its refresh token is kept in Key Vault, and Conditional Access confines its sign-ins to the function's fixed outbound IP address.
 
 See also the [naming convention](naming-convention.md).
 
@@ -136,13 +136,13 @@ Segregation of duties: requesters can't approve; reviewers can't sign or write t
 | --- | --- | --- | --- |
 | **Guard** (`id-absg-guard-prod`) | User-assigned managed identity | Graph: `CopilotPackages.ReadWrite.All`, `User.Read.All`, `GroupMember.Read.All`, `Sites.Selected` (write on the Operations and archive sites, read on the Registry site). Exchange: `Application Mail.Send` (scoped). Key Vault: read two secrets; verify only on the registry key | Write the registry; sign entries; send from other mailboxes |
 | **Registry signer** (`id-absg-signer-prod`) | User-assigned managed identity, own Function app | Key Vault: sign on the registry key. Graph: `Sites.Selected` (write on the Registry site), `CopilotPackages.Read.All`, `User.Read.All` | Block or unblock agents; send mail |
-| **Sharing-removal account** (`svc-absg@`) | Cloud-only user | Delegated `CopilotPackages.ReadWrite.All` through a single-tenant public client app; least-privileged admin role that can manage agents | Sign in from anywhere but the NAT IP |
+| **Delegated account** (`svc-absg@`) | Cloud-only user | Blocks, unblocks and removes sharing. Delegated `CopilotPackages.ReadWrite.All` through a single-tenant public client app; least-privileged admin role that can manage agents | Sign in from anywhere but the NAT IP |
 | **Acknowledgement flow** (`svc-absg-flow@`) | Power Automate connection account | Contribute on *Agent Acknowledgements* only | Read anything else |
 | **People** | Entra groups (`ABSG - Governance Reviewers`, `ABSG - Operators`, break-glass) | Site and list permissions; PIM for any admin role | Edit the audit library (records label) |
 
-The sharing-removal account is the main residual risk. It's a user account with an admin role, because Microsoft documents the update API as delegated-only. Mitigate it with Conditional Access, a token kept only in Key Vault, sign-in alerting and quarterly access reviews.
+The delegated account is the main residual risk. It's a user account with an admin role, because Microsoft documents the block, unblock and update APIs with delegated permissions only. Enforcement depends on it: if its token expires, the guard can't block until it's signed in again. Mitigate it with Conditional Access, a token kept only in Key Vault, sign-in alerting and quarterly access reviews.
 
-> **Check app-only access early.** Microsoft's documentation lists application permissions for the Package Management API, but at least one community report says the endpoints rejected app-only tokens in their tenant. If that's true for yours, every guard call needs the delegated account.
+> **Check access early.** The guard reads agents app-only and writes as the delegated account. If your tenant refuses app-only reads too, every guard call needs the delegated account, which this deployment doesn't support yet.
 
 ## Network and runtime security
 
@@ -164,7 +164,7 @@ The sharing-removal account is the main residual risk. It's a user account with 
 | ShareGuard not running | No `cycle_end` for 3 intervals |
 | Circuit breaker tripped | A `circuit_breaker` event |
 | Audit integrity failure | Exit code 2, or the nightly `absg --verify-audit` check fails |
-| Delegated token expired | `sharing_removal` fails with 401 |
+| Delegated token expired | `enforcement_identity_failed`, or `sharing_removal` fails with 401 |
 | Service account misuse | Any `svc-absg@` sign-in from an IP other than the NAT IP |
 | Registry tampering | A `registry_entry_invalid` event |
 

@@ -14,6 +14,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Block and unblock now run as the delegated account (`block_identity: "delegated"`, the default), because Microsoft documents them with delegated permissions only; with no delegated client configured, ShareGuard falls back to the application with a warning. A refused block or unblock records `enforcement_identity_failed` and alerts the admins once per cycle, with an Azure Monitor alert rule. `block` and `unblock` audit records name the `actingIdentity`.
 - The Package Management API's write methods (update, block, unblock, reassign) are documented only under `/beta`, but were sent to v1.0. They now go to `graph_beta_base` (default `https://graph.microsoft.com/beta`), as does the experimental delete call. Reads (list, get) stay on v1.0.
 - Azure deployment guide: the `local.json` example for `--login-delegated` was refused by the settings check (it needs `client_id` and a credential setting), and the registry key rotation steps relied on re-approving registered requests, which the signer now refuses.
 - A cycle that failed part-way, for example when the package list failed on a later page, lost the state of blocks it had already issued. Those agents then looked like admin blocks and were never released. State is now saved after each block and at the end of every cycle, and an unexpected error on one package no longer aborts the cycle.

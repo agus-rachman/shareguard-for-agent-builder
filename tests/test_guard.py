@@ -353,3 +353,73 @@ def test_unexpected_error_on_one_package_does_not_abort_the_cycle(cfg):
     r = Guard(cfg, graph, StateStore(cfg.state_file)).run_cycle()
     assert r.errors == ["a"] and r.blocked == ["b"]
     assert StateStore(cfg.state_file).is_ours("b")
+
+
+# ---- Block and unblock run as the delegated account ------------------------------
+class DelegatedGraph(FakeGraph):
+    """The delegated client: same tenant, its own call log."""
+
+    def __init__(self, app_graph, fail=None):
+        self.packages = app_graph.packages
+        self.calls = []
+        self.fail = fail
+
+    def block(self, pid):
+        if self.fail:
+            raise GraphError(self.fail, "Delegated sign-in missing or expired: run --login-delegated")
+        super().block(pid)
+
+
+def test_block_and_unblock_use_the_delegated_account(cfg):
+    cfg.delegated_username = "svc-absg@contoso.com"
+    graph = FakeGraph([pkg("a", shared=[USER])])
+    delegated = DelegatedGraph(graph)
+    guard = Guard(cfg, graph, StateStore(cfg.state_file), delegated_graph=delegated)
+    guard.run_cycle()
+    graph.packages["a"]["sharedWithUsersAndGroups"] = []
+    guard.run_cycle()
+    assert graph.calls == []                                   # never app-only
+    assert delegated.calls == [("block", "a"), ("unblock", "a")]
+
+
+def test_application_identity_when_configured_or_no_delegated_client(cfg, caplog):
+    graph = FakeGraph([pkg("a", shared=[USER])])
+    Guard(cfg, graph, StateStore(cfg.state_file)).run_cycle()  # no delegated client: falls back
+    assert graph.calls == [("block", "a")]
+    assert "no delegated client is configured" in caplog.text
+
+    cfg.block_identity = "application"
+    graph2 = FakeGraph([pkg("b", shared=[USER])])
+    delegated = DelegatedGraph(graph2)
+    Guard(cfg, graph2, StateStore(cfg.state_file), delegated_graph=delegated).run_cycle()
+    assert graph2.calls == [("block", "b")] and delegated.calls == []
+
+
+def test_refused_delegated_block_alerts_once_per_cycle(cfg, tmp_path):
+    from absg.core import AuditLog
+    import json
+    cfg.delegated_username = "svc-absg@contoso.com"
+    graph = FakeGraph([pkg("a", shared=[USER]), pkg("b", shared=[USER])])
+    events = []
+    audit = AuditLog(str(tmp_path / "audit.jsonl"))
+    guard = Guard(cfg, graph, StateStore(cfg.state_file), lambda e, p: events.append(e), audit=audit,
+                  delegated_graph=DelegatedGraph(graph, fail=401))
+    r = guard.run_cycle()
+    assert sorted(r.errors) == ["a", "b"] and not r.blocked
+    assert not StateStore(cfg.state_file).is_ours("a")          # nothing recorded as blocked
+    recs = [json.loads(line) for line in open(tmp_path / "audit.jsonl")]
+    failed = [x for x in recs if x["event"] == "block"]
+    assert {x["outcome"] for x in failed} == {"failed"}
+    assert {x["actingIdentity"] for x in failed} == {"svc-absg@contoso.com"}
+    assert [x["event"] for x in recs].count("enforcement_identity_failed") == 1
+    assert events.count("enforcement_identity_failed") == 1
+    guard.run_cycle()                                           # alerted again next cycle
+    assert events.count("enforcement_identity_failed") == 2
+
+
+def test_block_identity_is_validated(tmp_path):
+    import json
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"tenant_id": "t", "client_id": "c", "client_secret": "s", "block_identity": "root"}))
+    with pytest.raises(ValueError, match="block_identity"):
+        Config.load(str(p))

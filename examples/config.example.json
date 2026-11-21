@@ -41,6 +41,7 @@
   "delegated_token_cache": "/secrets/absg_delegated_cache.json",
   "delegated_username": "svc-absg@contoso.com",
   "removal_available_to_value": "allowedForSome",
+  "block_identity": "delegated",
   "registry_file": "/data/absg_registry.json",
   "registry_public_key_file": "/secrets/absg_registry_public_key.pem",
   "require_registry_signatures": true,

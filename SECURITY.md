@@ -38,7 +38,7 @@ ShareGuard for Agent Builder holds permissions that can block and unblock every 
 - Scope `Mail.Send` to a single mailbox with Exchange RBAC for Applications.
 - Keep the registry signing **private key offline** (or in an HSM). The daemon needs only the public key.
 - Store the audit trail somewhere immutable, and verify it on a schedule with `absg --verify-audit`.
-- Restrict the delegated sharing-removal account with Conditional Access, and monitor its sign-ins.
+- Restrict the delegated account (it blocks, unblocks and removes sharing) with Conditional Access, and monitor its sign-ins.
 - If you enable the built-in acknowledgement endpoint, run it only behind an authenticating proxy with `ack_require_identity: true`.
 
 See [docs/deployment-architecture.md](docs/deployment-architecture.md) for a full least-privilege design.
