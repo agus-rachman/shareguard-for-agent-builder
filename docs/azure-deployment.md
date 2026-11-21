@@ -94,7 +94,13 @@ az keyvault secret set --vault-name <kv> --name delegated-token-cache --file abs
 shred -u absg_delegated_cache.json
 ```
 
-`local.json` only needs `tenant_id`, `delegated_client_id`, `delegated_username` and `delegated_token_cache`. Key Vault is private, so run `az keyvault secret set` from inside the VNet, or add your IP to the vault firewall temporarily. Then:
+`local.json` needs only these keys. `client_id` and `use_managed_identity` are there to pass the settings check; the sign-in doesn't use them:
+
+```json
+{"tenant_id": "<tenant-id>", "client_id": "unused", "use_managed_identity": true,
+ "delegated_client_id": "<delegated-client-id>", "delegated_username": "svc-absg@contoso.com",
+ "delegated_token_cache": "absg_delegated_cache.json"}
+``` Key Vault is private, so run `az keyvault secret set` from inside the VNet, or add your IP to the vault firewall temporarily. Then:
 
 - give `svc-absg@` the least-privileged admin role that can manage agents in your pilot;
 - add a Conditional Access policy allowing it to sign in **only** from the NAT IP (`natPublicIp`), and alert on any other sign-in.
@@ -157,5 +163,5 @@ To customise email wording, put template files in the `templates` folder of the 
 | Verify the audit trail | Runs nightly; on demand: `absg --verify-audit-store` with the guard's settings |
 | Pause enforcement | Set `ABSG_DRY_RUN=1` on the guard app |
 | Rotate the acknowledgement key | Set a new version of the `ack-token-hmac-key` secret; outstanding links stop working, owners get new ones with the next notice |
-| Rotate the registry key | Create a new key version, then have the signer re-sign every entry (set each request to `Approved` again). Entries signed with the old version stop verifying once the guard picks up the new public key. |
+| Rotate the registry key | Every entry must be re-signed with the new key version. The signer refuses to approve a registered request again, so submit a new request for each approved agent. The guard and signer use the new version as soon as it exists, and until an agent's new entry is signed its old one doesn't verify, so the agent is treated as unapproved. Rotate in a maintenance window with the guard in dry run (`ABSG_DRY_RUN=1`), and end dry run once every agent is registered again. |
 | Release a stuck agent | Fix the cause (remove sharing, revert drift, approve); the guard unblocks on its next cycle. Never unblock a guard block by hand: the guard re-blocks it. |
