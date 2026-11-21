@@ -14,12 +14,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- Azure deployment guide: the `local.json` example for `--login-delegated` was refused by the settings check (it needs `client_id` and a credential setting), and the registry key rotation steps relied on re-approving registered requests, which the signer now refuses.
 - A cycle that failed part-way, for example when the package list failed on a later page, lost the state of blocks it had already issued. Those agents then looked like admin blocks and were never released. State is now saved after each block and at the end of every cycle, and an unexpected error on one package no longer aborts the cycle.
 - Azure Functions start every invocation with no registry in memory, so one failed registry read blocked every approved, shared agent. The last good registry copy is now kept in the state and re-verified when it's used. With no copy at all, decisions on shared agents are deferred (`decision_deferred`).
 - Audit records that the SharePoint backend couldn't write were lost when the invocation ended. They're now kept in the state and written first by the next invocation, either joined onto the stored chain or dropped if they were written after all.
 
 ### Added
 
+- [Test environment setup guide](docs/test-environment-setup.md): an end-to-end test environment in a separate tenant, smoke checks in dry run, 18 test scenarios with expected results, troubleshooting and teardown, and a local Windows path for testers without an Azure subscription.
 - **Azure deployment.** Azure Functions app (`azure/functionapp`) with a guard role (timer scan, nightly audit chain check) and a separate registry signer role; Bicep template (`azure/infra`) for Flex Consumption, VNet with NAT gateway, private Key Vault (HSM key) and storage, managed identities, role assignments and alerts; provisioning scripts (`azure/scripts`) for Graph permissions, `Sites.Selected` site access, Exchange RBAC for Applications, SharePoint lists and libraries, and the delegated client; `azure/deploy.sh`; [Azure deployment guide](docs/azure-deployment.md).
 - Managed identity authentication and a Key Vault client (`absg.cloud`), with no Azure SDK dependency.
 - SharePoint storage (`storage_backend: "sharepoint"`): eTag-checked state, daily hash-chained audit files with a retention label, registry from the *Approved Agents* list, acknowledgements from a Microsoft Forms + Power Automate list. `--verify-audit-store` checks the chain wherever it's stored.
