@@ -90,7 +90,7 @@ class RegistrySigner:
         return next(iter(self.site.list_items(list_name, f"fields/Title eq '{safe}'")), None)
 
     def _sign(self, entry: dict) -> dict:
-        entry = {**entry, "signatureAlgorithm": "ES256"}
+        entry = {**entry, "signatureAlgorithm": "ES256", "signedAt": datetime.now(timezone.utc).isoformat()}
         entry.pop("signature", None)
         signed = attach_signature(entry, self.vault.sign_es256(self.cfg.registry_key_name,
                                                                signing_payload(entry)), "ES256")

@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Security
 
 - Requesters could approve their own sharing requests: item-level permissions let them edit `Status`, `ApprovedBy`, the criteria and `PolicyJson` on their own item, and the signer trusted those fields. `Provision-AbsgSharePoint.ps1` now gives requesters an *ABSG Submit* permission level (add and read own, no edits). With `signer_trusted_editors` set, the signer also checks each request's version history. It refuses to register a request twice, which could otherwise renew an approval and re-baseline a drifted agent, and treats `RequestedBy` as the requester.
+- An earlier signed registry entry could be put back, for example from SharePoint version history, to undo a revocation: its signature still verified. Entries now carry a signed `signedAt`. The guard records the newest one it has seen for each agent in its state, and rejects older entries (`registry_rollback_rejected`, with an admin alert).
 
 ### Fixed
 

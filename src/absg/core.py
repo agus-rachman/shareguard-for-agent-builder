@@ -459,6 +459,9 @@ class StateStore:
         # packageId -> hash of the registry entry last seen (to audit changes)
         self.registry_hashes: dict[str, str] = {}
         self.registry_invalid: dict[str, str] = {}
+        # packageId -> signedAt of the newest registry entry seen (rejects rollbacks).
+        # Never pruned: an old entry must stay rejected even after a long absence.
+        self.registry_newest: dict[str, str] = {}
         # packageId -> lifecycle record (inactivity warnings, reactivation, ownerless reports)
         self.lifecycle: dict[str, dict] = {}
         # Last registry copy that loaded ({"agents": [...], "hash": ...}): entries are
@@ -476,6 +479,7 @@ class StateStore:
             self.validations = raw.get("validations", {})
             self.registry_hashes = raw.get("registry_hashes", {})
             self.registry_invalid = raw.get("registry_invalid", {})
+            self.registry_newest = raw.get("registry_newest", {})
             self.lifecycle = raw.get("lifecycle", {})
             self.registry_snapshot = raw.get("registry_snapshot")
             self.pending_audit = raw.get("pending_audit", [])
@@ -501,6 +505,7 @@ class StateStore:
                        "validations": self.validations,
                        "registry_hashes": self.registry_hashes,
                        "registry_invalid": self.registry_invalid,
+                       "registry_newest": self.registry_newest,
                        "lifecycle": self.lifecycle,
                        "registry_snapshot": self.registry_snapshot,
                        "pending_audit": self.pending_audit})
@@ -1139,6 +1144,8 @@ class Guard:
                 # A fresh process (an Azure Functions invocation) has no copy in memory:
                 # fall back on the one saved in the state. Entries are re-verified.
                 self.registry.apply(snap["agents"], snap.get("hash"))
+                self._reject_rollbacks()
+                self.state.registry_invalid = dict(self.registry.invalid)
                 self._audit("error", stage="registry_load", error=str(exc),
                             reason="registry could not be loaded; using the copy saved in the state",
                             registryFileHash=snap.get("hash"))
@@ -1148,6 +1155,7 @@ class Guard:
                         reason="registry could not be loaded and no earlier copy exists; "
                                "decisions on shared agents are deferred this cycle")
             return
+        self._reject_rollbacks()
         self.state.registry_snapshot = {"agents": self.registry.raw_agents,
                                         "hash": self.registry.file_hash}
         current = self.registry.entry_hashes()
@@ -1176,6 +1184,18 @@ class Guard:
         self.state.registry_invalid = dict(self.registry.invalid)
         self.state.registry_hashes = current
         self._registry_file_hash = self.registry.file_hash
+
+    def _reject_rollbacks(self) -> None:
+        for pid in self.registry.reject_rollbacks(self.state.registry_newest):
+            if self.state.registry_invalid.get(pid) == self.registry.invalid[pid]:
+                continue                     # already reported
+            self._audit("registry_rollback_rejected", {"id": pid}, reason=self.registry.invalid[pid],
+                        newestSignedAt=self.state.registry_newest.get(pid))
+            self.notify("registry_rollback_rejected", {"packageId": pid, "reason": self.registry.invalid[pid]})
+            self._admin_alert({"id": pid}, None, "Registry entry rejected: an earlier entry was put back", {
+                "Problem": self.registry.invalid[pid],
+                "Next step": "Find who restored the entry (list version history); the agent is treated "
+                             "as unapproved until the signer writes a current entry"})
 
     # -- block --------------------------------------------------------------
     def _block(self, d: dict, result: CycleResult, recipients: list[dict], owner: str | None,

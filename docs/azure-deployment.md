@@ -130,7 +130,7 @@ Review it with a **Power Automate approval** flow (standard connectors):
 
 The signer then takes over. It reads the live agent, refuses (`Needs criteria`, with the reason in `SignerComments`) if any criterion is missing or failed, the approver is the requester or an owner, an owner's account is inactive, the expiry is past or beyond `max_approval_days`, the audience is empty, someone other than a trusted editor changed the request, or the request was already registered (renewing or changing an approval needs a new request). Otherwise it captures the configuration baseline, signs the entry with the HSM key, checks the signature, writes it to **Approved Agents** and sets the request to `Registered` with `RegisteredEntryHash`. To withdraw an approval, set the request to `Revoke requested`; the signer re-signs the entry as `revoked` and marks the request `Revoked`.
 
-Nobody edits *Approved Agents* by hand. An edited entry fails signature verification, `registry_entry_invalid` is audited and an alert fires, and the agent is treated as unapproved.
+Nobody edits *Approved Agents* by hand. An edited entry fails signature verification, `registry_entry_invalid` is audited and an alert fires, and the agent is treated as unapproved. Restoring an earlier version from the list's version history (for example, putting back an approval that was revoked) is caught too. The guard keeps the newest `signedAt` it has seen for each agent in its state on the Operations site, and rejects older entries (`registry_rollback_rejected`). Registry site owners must therefore not have write access to the Operations site.
 
 ## Step 7: Pilot, then enforce
 

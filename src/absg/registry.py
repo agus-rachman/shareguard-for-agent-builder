@@ -202,6 +202,7 @@ def sign_entry(entry: dict, private_key_pem: bytes) -> dict:
     signed = copy.deepcopy(entry)
     signed.pop("signature", None)
     signed["signatureAlgorithm"] = _algorithm_name(key)
+    signed["signedAt"] = datetime.now(timezone.utc).isoformat()   # orders entries: see reject_rollbacks
     signed["signature"] = base64.b64encode(_sign_bytes(key, signing_payload(signed))).decode()
     return signed
 
@@ -386,6 +387,26 @@ class Registry:
         self.file_hash = raw_hash
         self.raw_agents = [list(a) if isinstance(a, tuple) else a for a in agents]
         self.loaded = True
+
+    def reject_rollbacks(self, newest_seen: dict[str, str]) -> list[str]:
+        """Reject entries signed before one already seen for the same agent.
+
+        A signature proves who wrote an entry, not that it's the latest: anyone who can
+        edit the registry could put back an earlier ``approved`` entry (SharePoint keeps
+        version history) after it was revoked. ``newest_seen`` (packageId -> ``signedAt``)
+        is kept by the guard, outside the registry, and is updated here."""
+        rejected = []
+        for pid, entry in list(self.entries.items()):
+            signed_at = str(entry.get("signedAt") or "")
+            seen = newest_seen.get(pid, "")
+            if signed_at < seen:
+                self.invalid[pid] = (f"entry signed {signed_at or 'without a date'} is older than one already "
+                                     f"seen (signed {seen}): an earlier entry was put back")
+                del self.entries[pid]
+                rejected.append(pid)
+            elif signed_at:
+                newest_seen[pid] = signed_at
+        return rejected
 
     def lookup(self, detail: dict) -> Approval | None:
         pid = detail.get("id")

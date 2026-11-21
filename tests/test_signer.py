@@ -224,3 +224,15 @@ def test_requested_by_counts_as_the_requester(signer_env):
     signer, g, *_ = signer_env(request_item(RequestedBy="jane.risk@contoso.com"))
     assert signer.run()["needsCriteria"] == ["p1"]
     assert "can't be the requester" in g.lists["Agent Sharing Requests"]["7"]["fields"]["SignerComments"]
+
+
+def test_signed_entries_carry_signed_at_and_revocation_is_newer(signer_env):
+    signer, g, site, vault, audit = signer_env(request_item())
+    signer.run()
+    (item,) = g.lists["Approved Agents"].values()
+    approved = json.loads(item["fields"]["EntryJson"])
+    g.lists["Agent Sharing Requests"]["7"]["fields"].update(Status="Revoke requested")
+    assert signer.run()["revoked"] == ["p1"]
+    revoked = json.loads(item["fields"]["EntryJson"])
+    assert approved["signedAt"] < revoked["signedAt"]
+    assert verify_entry(revoked, vault.public_jwk("registry-signing-key"))
