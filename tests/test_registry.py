@@ -377,3 +377,42 @@ def test_rs256_keygen_and_jwk_export_cli(tmp_path, capsys):
     detail = {"id": "p1", "displayName": "A", "elementDetails": []}
     entry = sign_entry(draft_entry(detail, "owner-1", []), priv)
     assert verify_entry(entry, pub_jwk)
+
+
+# ---- Registry unavailable on a cold start (Azure Functions) ---------------------
+def test_cold_start_registry_failure_uses_snapshot_from_state(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    assert guard.run_cycle().approved_compliant == ["hr"]
+
+    # New process (fresh Registry, state reloaded from disk); the registry source fails.
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.approved_compliant == ["hr"] and r.blocked == []
+    assert not tenant.packages["hr"].get("isBlocked")
+    assert any("copy saved in the state" in e.get("reason", "") for e in recs(audit, "error"))
+
+
+def test_snapshot_entries_are_reverified(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    guard.run_cycle()
+    state = json.loads((tmp_path / "state.json").read_text())
+    state["registry_snapshot"]["agents"][0]["sharing"]["allowedPrincipals"].append(
+        {"resourceType": "group", "resourceId": "everyone"})      # tampered snapshot
+    (tmp_path / "state.json").write_text(json.dumps(state))
+
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.approved_compliant == [] and r.blocked == ["hr"]
+
+
+def test_cold_start_without_any_registry_copy_defers_instead_of_mass_blocking(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.blocked == [] and not tenant.packages["hr"].get("isBlocked")
+    assert [x["package"]["id"] for x in recs(audit, "decision_deferred")] == ["hr"]

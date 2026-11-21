@@ -111,6 +111,32 @@ class RegistrySigner:
         else:
             self.site.create_item(self.cfg.sharepoint_registry_list, fields)
 
+    def _check_history(self, item: dict) -> list[str]:
+        """Problems if anyone but a trusted editor changed the request after it was created.
+
+        Item-level permissions let a requester edit their own item, so the fields the
+        signer trusts (Status, ApprovedBy, the criteria, PolicyJson, PackageId, ...)
+        must be shown to come from the approval flow or a reviewer."""
+        trusted = {t.lower() for t in self.cfg.signer_trusted_editors}
+        if not trusted:
+            log.warning("signer_trusted_editors is not set: request edit history is not checked")
+            return []
+        trusted.add(str(self.cfg.client_id).lower())          # the signer's own status updates
+        versions = self.site.item_versions(self.cfg.sharepoint_requests_list, item["id"])
+        if not versions:
+            return ["the request's version history is unavailable (turn on list versioning)"]
+        problems = []
+        for v in versions[:-1]:                                # the oldest version is the submission
+            by = v.get("lastModifiedBy") or {}
+            who = {str(x.get(k, "")).lower() for x in (by.get("user") or {}, by.get("application") or {})
+                   for k in ("id", "email") if x.get(k)}
+            if not who & trusted:
+                name = (by.get("user") or by.get("application") or {})
+                problems.append(f"version {v.get('id')} was edited by "
+                                f"{name.get('email') or name.get('displayName') or name.get('id') or 'unknown'}, "
+                                "who isn't a reviewer or the approval flow")
+        return problems
+
     def _mark(self, item: dict, status: str, **fields: Any) -> None:
         self.site.update_fields(self.cfg.sharepoint_requests_list, item["id"], {"Status": status, **fields})
 
@@ -121,6 +147,14 @@ class RegistrySigner:
         pid = (f.get("PackageId") or "").strip()
         if not pid:
             raise RequestProblem(["PackageId is empty"])
+        if f.get("RegisteredEntryHash"):
+            # Re-approving a registered request would re-sign it with a fresh expiry and a
+            # baseline taken from the agent as it is now, wiping out any drift.
+            raise RequestProblem(["this request is already registered; submit a new request "
+                                  "to change or renew the approval"])
+        history = self._check_history(item)
+        if history:
+            raise RequestProblem(history)
         try:
             detail = self.graph.get_package(pid)
         except GraphError as exc:
@@ -128,6 +162,8 @@ class RegistrySigner:
 
         requester = ((item.get("createdBy") or {}).get("user") or {})
         requester_ids = {str(requester.get(k, "")).lower() for k in ("id", "email") if requester.get(k)}
+        # When a flow creates the item for the requester, it records them in RequestedBy.
+        requester_ids |= {r.lower() for r in _split(f.get("RequestedBy"))}
         owner_refs = _split(f.get("Owners")) or ([requester.get("email") or requester.get("id")]
                                                 if requester else [])
         owners, owner_upns = [], []
@@ -203,7 +239,7 @@ class RegistrySigner:
             "criteria": criteria,
             "conditions": _split(f.get("Conditions")),
             "notes": f.get("ReviewerComments") or "",
-            "requestedBy": requester.get("email") or requester.get("id"),
+            "requestedBy": (f.get("RequestedBy") or "").strip() or requester.get("email") or requester.get("id"),
             "justification": f.get("Justification") or "",
         }
         entry["policy"].update(policy_overrides)
@@ -264,6 +300,8 @@ class RegistrySigner:
         entry = json.loads((existing.get("fields") or {}).get("EntryJson") or "{}")
         if not verify_entry(entry, self._public_key()):
             raise RequestProblem(["the current entry's signature doesn't verify; investigate before revoking"])
+        # No edit-history check here: revoking only removes access, and a requester's edit
+        # must not be able to block it.
         approver = (f.get("ApprovedBy") or "").strip()
         if not approver:
             raise RequestProblem(["ApprovedBy is empty"])

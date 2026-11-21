@@ -30,6 +30,7 @@ class SignerGraph(FakeGraph):
                                                "accountEnabled": True},
                           "gone@contoso.com": {"id": "owner-3", "userPrincipalName": "gone@contoso.com",
                                                "accountEnabled": False}}
+        self.versions = {}       # item id -> versions, newest first
 
     def get_package(self, pid):
         if pid not in self.packages:
@@ -37,6 +38,9 @@ class SignerGraph(FakeGraph):
         return json.loads(json.dumps(self.packages[pid]))
 
     def request(self, method, url, headers=None, json=None, data=None, **kw):
+        if url.endswith("/versions"):
+            item_id = url.split("/items/")[1].split("/")[0]
+            return Resp({"value": self.versions.get(item_id, [])})
         if url.startswith("/users/") and "accountEnabled" in url:
             ref = url.split("/")[2].split("?")[0]
             if ref not in self.directory:
@@ -176,3 +180,47 @@ def test_criteria_come_from_the_config():
     cfg = Config(tenant_id="t", client_id="c", approval_criteria=[
         {"column": "PRIV01", "id": "PRIV-01", "description": "Privacy impact assessed"}])
     assert criteria_from_config(cfg) == [("PRIV01", "PRIV-01", "Privacy impact assessed")]
+
+
+# ---- Who changed the request ---------------------------------------------------
+FLOW = {"user": {"id": "flow-1", "email": "svc-absg-flow@contoso.com"}}
+REQUESTER = {"user": {"id": "owner-1", "email": "olivia@contoso.com"}}
+SIGNER_APP = {"application": {"id": "mi", "displayName": "absg-signer"}}
+
+
+def versions(*editors):
+    """Newest first; the last one is the submission."""
+    return [{"id": f"{len(editors) - i}.0", "lastModifiedBy": e} for i, e in enumerate(editors)]
+
+
+def test_request_approved_by_the_flow_is_registered(signer_env):
+    signer, g, *_ = signer_env(request_item(), signer_trusted_editors=["svc-absg-flow@contoso.com"])
+    g.versions["7"] = versions(FLOW, SIGNER_APP, FLOW, REQUESTER)
+    assert signer.run()["registered"] == ["p1"]
+
+
+def test_requester_editing_their_own_request_is_refused(signer_env):
+    # The requester set Status = Approved, ApprovedBy and the criteria themselves.
+    signer, g, *_ = signer_env(request_item(), signer_trusted_editors=["svc-absg-flow@contoso.com"])
+    g.versions["7"] = versions(REQUESTER, FLOW, REQUESTER)
+    out = signer.run()
+    assert out["needsCriteria"] == ["p1"] and "Approved Agents" not in g.lists
+    reason = g.lists["Agent Sharing Requests"]["7"]["fields"]["SignerComments"]
+    assert "edited by olivia@contoso.com" in reason
+
+
+def test_missing_version_history_is_refused(signer_env):
+    signer, g, *_ = signer_env(request_item(), signer_trusted_editors=["flow-1"])
+    assert signer.run()["needsCriteria"] == ["p1"]
+
+
+def test_registered_request_cannot_be_approved_again(signer_env):
+    signer, g, *_ = signer_env(request_item(RegisteredEntryHash="abc"))
+    assert signer.run()["needsCriteria"] == ["p1"]
+    assert "already registered" in g.lists["Agent Sharing Requests"]["7"]["fields"]["SignerComments"]
+
+
+def test_requested_by_counts_as_the_requester(signer_env):
+    signer, g, *_ = signer_env(request_item(RequestedBy="jane.risk@contoso.com"))
+    assert signer.run()["needsCriteria"] == ["p1"]
+    assert "can't be the requester" in g.lists["Agent Sharing Requests"]["7"]["fields"]["SignerComments"]

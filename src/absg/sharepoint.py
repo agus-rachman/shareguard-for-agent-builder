@@ -137,6 +137,11 @@ class SharePointSite:
             yield from data.get("value", [])
             url = data.get("@odata.nextLink")
 
+    def item_versions(self, list_name: str, item_id: str) -> list[dict]:
+        """Every version of a list item, newest first (each with ``lastModifiedBy``)."""
+        return list(self.graph.get_paged(
+            f"/sites/{self.site_id}/lists/{quote(list_name)}/items/{quote(str(item_id))}/versions"))
+
     def update_fields(self, list_name: str, item_id: str, fields: dict) -> None:
         self.graph.request("PATCH", f"/sites/{self.site_id}/lists/{quote(list_name)}/items/{item_id}/fields",
                            json=fields)
@@ -164,6 +169,18 @@ class SharePointJsonDocument:
 
 
 # ------------------------------------------------------------------------------ audit
+def _rechain(records: list[dict], seq: int, prev: str) -> list[dict]:
+    from .core import _record_hash
+    out = []
+    for rec in records:
+        seq += 1
+        rec = {**rec, "seq": seq, "prevHash": prev}
+        rec["hash"] = _record_hash(rec)
+        prev = rec["hash"]
+        out.append(rec)
+    return out
+
+
 class SharePointAuditBackend:
     """Hash-chained audit records in daily JSON Lines files (``<prefix>YYYY-MM-DD.jsonl``).
 
@@ -175,10 +192,12 @@ class SharePointAuditBackend:
     """
 
     def __init__(self, site: SharePointSite, library: str, folder: str = "",
-                 prefix: str = "absg-audit-", retention_label: str | None = None):
+                 prefix: str = "absg-audit-", retention_label: str | None = None,
+                 pending: list[dict] | None = None):
         self.site, self.library, self.folder = site, library, folder.strip("/")
         self.prefix, self.retention_label = prefix, retention_label
-        self.buffer: list[dict] = []
+        # ``pending``: records an earlier process couldn't write (kept in the guard's state).
+        self.buffer: list[dict] = [dict(r) for r in pending or []]
         self._labelled: set[str] = set()
 
     def _name(self, day: str) -> str:
@@ -192,7 +211,7 @@ class SharePointAuditBackend:
                if c.get("name", "").startswith(self.prefix) and c["name"].endswith(".jsonl")]
         return sorted(out, key=lambda c: c["name"])
 
-    def resume(self) -> tuple[int, str]:
+    def _stored_tail(self) -> tuple[int, str]:
         from .core import GENESIS_HASH
         for f in reversed(self.files()):
             content, _ = self.site.download(self.library, self._path(f["name"]))
@@ -201,6 +220,30 @@ class SharePointAuditBackend:
                 rec = json.loads(lines[-1])
                 return int(rec["seq"]), rec["hash"]
         return 0, GENESIS_HASH
+
+    def resume(self) -> tuple[int, str]:
+        seq, last = self._stored_tail()
+        if not self.buffer:
+            return seq, last
+        # Drop records that were written after all (a lost response, or another process
+        # flushed the same pending copy): look for them in their days' files.
+        stored: set[str] = {last}
+        existing = {f["name"] for f in self.files()}
+        for day in sorted({str(r.get("timestamp", ""))[:10] for r in self.buffer}):
+            if self._name(day) in existing:
+                content, _ = self.site.download(self.library, self._path(self._name(day)))
+                for ln in (content or b"").decode().splitlines():
+                    if ln.strip():
+                        stored.add(json.loads(ln).get("hash"))
+        self.buffer = [r for r in self.buffer if r.get("hash") not in stored]
+        if self.buffer and (self.buffer[0].get("prevHash") != last or self.buffer[0].get("seq") != seq + 1):
+            # Something else wrote to the chain meanwhile. These records were never
+            # published, so chain them onto what is actually stored.
+            log.warning("Re-chaining %d unwritten audit records onto seq %d", len(self.buffer), seq)
+            self.buffer = _rechain(self.buffer, seq, last)
+        if self.buffer:
+            return int(self.buffer[-1]["seq"]), self.buffer[-1]["hash"]
+        return seq, last
 
     def append(self, rec: dict) -> None:
         self.buffer.append(rec)

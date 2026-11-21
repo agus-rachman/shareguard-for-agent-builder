@@ -50,6 +50,9 @@ param approvalCriteria array = []
 @description('Longest approval a reviewer may grant, in days.')
 param maxApprovalDays int = 365
 
+@description('Who may change a sharing request after it is submitted: the approval flow account and the reviewers (UPNs or Entra object ids). The signer refuses requests edited by anyone else. Empty = not checked (not recommended).')
+param signerTrustedEditors array = []
+
 @description('Email settings merged into the guard configuration, for example email_brand_name, email_subject_prefix, email_footer, email_button_colour.')
 param email object = {}
 
@@ -522,6 +525,7 @@ var signerConfig = union(commonConfig, {
   client_id: signerId.properties.clientId
   approval_criteria: empty(approvalCriteria) ? null : approvalCriteria
   max_approval_days: maxApprovalDays
+  signer_trusted_editors: signerTrustedEditors
 })
 
 module guardApp 'modules/functionapp.bicep' = {

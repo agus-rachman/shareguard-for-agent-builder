@@ -355,16 +355,25 @@ class Registry:
         self.entries: dict[str, dict] = {}
         self.invalid: dict[str, str] = {}
         self.file_hash: str | None = None
+        self.loaded = False                   # True once a copy has loaded in this process
+        self.raw_agents: list[Any] = []       # what was loaded, for the guard's state snapshot
 
     def load(self) -> None:
         """Parse the registry. On any error the previous (last good) copy is
         kept and the exception is raised for the caller to audit."""
         agents, raw_hash = self.source.fetch()
+        self.apply(agents, raw_hash)
+
+    def apply(self, agents: list[Any], raw_hash: str | None) -> None:
+        """Use these entries (from the source, or a saved snapshot). Signatures are
+        checked here, so a snapshot can't approve anything the source didn't."""
         entries: dict[str, dict] = {}
         invalid: dict[str, str] = {}
         for entry in agents:
-            if isinstance(entry, tuple):          # (key, None): an item that isn't valid JSON
-                invalid[entry[0]] = "entry is not valid JSON"
+            if isinstance(entry, (tuple, list)):  # (key, None): an item that isn't valid JSON
+                invalid[str(entry[0])] = "entry is not valid JSON"
+                continue
+            if not isinstance(entry, dict):
                 continue
             pid = entry.get("packageId")
             if not pid:
@@ -375,6 +384,8 @@ class Registry:
             entries[pid] = entry
         self.entries, self.invalid = entries, invalid
         self.file_hash = raw_hash
+        self.raw_agents = [list(a) if isinstance(a, tuple) else a for a in agents]
+        self.loaded = True
 
     def lookup(self, detail: dict) -> Approval | None:
         pid = detail.get("id")

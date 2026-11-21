@@ -410,3 +410,61 @@ def test_email_templates_from_sharepoint_folder(site):
     sp.upload("ABSG State", "templates/share_notice.html", b"Subject: x\n{{oops}}", None)
     with pytest.raises(TemplateError):
         email_templates(cfg, sp)
+
+
+def test_unwritten_audit_records_survive_a_new_process(site):
+    """Azure Functions: a failed flush keeps records in the state; the next invocation writes them."""
+    sp, g = site
+    log1 = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit"))
+    log1.record("written")
+    log1.flush()
+    log1.record("lost-before-the-fix")
+    real = g.request
+
+    def failing(method, url, **kw):
+        if method == "PUT":
+            raise GraphError(503, "busy")
+        return real(method, url, **kw)
+    g.request = failing
+    with pytest.raises(GraphError):
+        log1.flush()
+    g.request = real
+    pending = log1.unflushed()
+    assert [r["event"] for r in pending] == ["lost-before-the-fix"]
+
+    backend = SharePointAuditBackend(sp, "ABSG Audit", pending=pending)
+    log2 = AuditLog(actor={}, backend=backend)
+    log2.record("next")
+    log2.flush()
+    lines = list(backend.iter_lines())
+    assert [json.loads(x)["event"] for x in lines if x.strip()] == ["written", "lost-before-the-fix", "next"]
+    assert verify_audit_lines(lines).ok
+
+
+def test_pending_audit_records_already_written_or_overtaken(site):
+    sp, g = site
+    log1 = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit"))
+    log1.record("a")
+    pending = log1.unflushed()
+    log1.flush()                                   # written, but the caller never learned it
+    other = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit", pending=pending))
+    other.record("b")
+    other.flush()
+    log3 = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit", pending=pending))
+    log3.flush()                                   # stale pending copy: dropped, not duplicated
+    lines = list(SharePointAuditBackend(sp, "ABSG Audit").iter_lines())
+    assert [json.loads(x)["event"] for x in lines if x.strip()] == ["a", "b"]
+    assert verify_audit_lines(lines).ok
+
+    # Pending records that something else overtook are re-chained onto the stored tail.
+    orphan = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit"))
+    orphan.record("c")
+    stale = orphan.unflushed()
+    newer = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit"))
+    newer.record("d")
+    newer.flush()
+    late = AuditLog(actor={}, backend=SharePointAuditBackend(sp, "ABSG Audit", pending=stale))
+    late.flush()
+    lines = list(SharePointAuditBackend(sp, "ABSG Audit").iter_lines())
+    assert [json.loads(x)["event"] for x in lines if x.strip()] == ["a", "b", "d", "c"]
+    assert verify_audit_lines(lines).ok

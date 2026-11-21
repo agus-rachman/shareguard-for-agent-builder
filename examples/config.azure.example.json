@@ -52,6 +52,7 @@
   "deletion_mode": "manual",
   "deletion_reminder_days": 7,
   "max_approval_days": 365,
+  "signer_trusted_editors": ["svc-absg-flow@contoso.com"],
   "approval_criteria": null,
   "max_blocks_per_cycle": 25,
   "exempt_ids": [],

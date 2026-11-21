@@ -181,6 +181,11 @@ class Config:
     # column is a Pass / Fail / N/A choice column in the requests list. None = the
     # defaults in absg.signer.CRITERIA (KS01, KS02, DS01, AU01, AC01).
     approval_criteria: list[dict] | None = None
+    # Who may change a sharing request after it's submitted: the approval flow's account
+    # and the reviewers (Entra object ids or UPNs; app ids for applications). When set,
+    # the signer refuses a request whose version history shows an edit by anyone else,
+    # for example the requester changing Status, ApprovedBy or the criteria themselves.
+    signer_trusted_editors: list[str] = field(default_factory=list)
 
     # --- Ownership and lifecycle ------------------------------------------
     # Check owners' Entra accounts (deleted or disabled = inactive). Needs User.Read.All.
@@ -456,6 +461,11 @@ class StateStore:
         self.registry_invalid: dict[str, str] = {}
         # packageId -> lifecycle record (inactivity warnings, reactivation, ownerless reports)
         self.lifecycle: dict[str, dict] = {}
+        # Last registry copy that loaded ({"agents": [...], "hash": ...}): entries are
+        # re-verified on use, so a cold start can fall back on it when the source fails.
+        self.registry_snapshot: dict | None = None
+        # Audit records a remote backend couldn't write; written first next time.
+        self.pending_audit: list[dict] = []
         raw = self.backend.load()
         if raw is not None:
             self.data = raw.get("blocked_by_guard", {})
@@ -467,6 +477,8 @@ class StateStore:
             self.registry_hashes = raw.get("registry_hashes", {})
             self.registry_invalid = raw.get("registry_invalid", {})
             self.lifecycle = raw.get("lifecycle", {})
+            self.registry_snapshot = raw.get("registry_snapshot")
+            self.pending_audit = raw.get("pending_audit", [])
 
     def is_ours(self, package_id: str) -> bool:
         return package_id in self.data
@@ -489,7 +501,9 @@ class StateStore:
                        "validations": self.validations,
                        "registry_hashes": self.registry_hashes,
                        "registry_invalid": self.registry_invalid,
-                       "lifecycle": self.lifecycle})
+                       "lifecycle": self.lifecycle,
+                       "registry_snapshot": self.registry_snapshot,
+                       "pending_audit": self.pending_audit})
 
 
 # --------------------------------------------------------------------------
@@ -564,6 +578,11 @@ class AuditLog:
         """Write buffered records (remote backends); a no-op for the local file."""
         with self._lock:
             self.backend.flush()
+
+    def unflushed(self) -> list[dict]:
+        """Records the backend still holds unwritten (remote backends only)."""
+        with self._lock:
+            return [dict(r) for r in getattr(self.backend, "buffer", [])]
 
 
 class FileAuditBackend:
@@ -783,11 +802,26 @@ class Guard:
         try:
             return self._run_cycle(result, seen, new_blocks)
         finally:
+            # Always runs, even when the cycle aborts part-way: blocks already issued must
+            # stay recorded as ours, or they'd look like admin blocks and never be released.
             if self.audit:
                 try:
                     self.audit.flush()
                 except Exception:
-                    log.exception("Audit flush failed; records are kept and retried next cycle")
+                    log.exception("Audit flush failed; unwritten records are kept in the state")
+                self.state.pending_audit = self.audit.unflushed()
+            # Raise a save failure (e.g. a second writer) unless another error is already on its way out.
+            self._save_state(raise_errors=sys.exc_info()[0] is None)
+
+    def _save_state(self, raise_errors: bool = False) -> None:
+        if self.cfg.dry_run:
+            return
+        try:
+            self.state.save()
+        except Exception:
+            if raise_errors:
+                raise
+            log.exception("State save failed")
 
     def _run_cycle(self, result: CycleResult, seen: set[str], new_blocks: int) -> CycleResult:
         self._sync_registry()
@@ -812,8 +846,9 @@ class Guard:
                 try:
                     detail = self.graph.get_package(pid)
                     new_blocks += self._reconcile(detail, result, new_blocks)
-                except GraphError as exc:
-                    log.error("Failed on package %s: %s", pid, exc)
+                except Exception as exc:   # one bad package must not abort the cycle
+                    log.error("Failed on package %s: %s", pid, exc,
+                              exc_info=not isinstance(exc, GraphError))
                     result.errors.append(pid)
                     self._audit("error", summary, stage="evaluate", error=str(exc))
         except GraphError as exc:
@@ -850,8 +885,6 @@ class Guard:
             self._audit("welcome_baseline", ownersBaselined=self._baselined,
                         reason="first run: existing owners recorded without a welcome email")
 
-        if not self.cfg.dry_run:
-            self.state.save()
         log.info("Cycle done: scanned=%d blocked=%d unblocked=%d reblocked=%d errors=%d",
                  result.scanned, len(result.blocked), len(result.unblocked),
                  len(result.reblocked), len(result.errors))
@@ -959,6 +992,13 @@ class Guard:
         lifecycle_block = self.state.data.get(pid, {}).get("blockType") if ours else None
         if blocked and lifecycle_block in ("retired", "ownerless"):
             self._reconcile_lifecycle_block(d, lifecycle_block, owners, recipients, result)
+            return 0
+
+        if shared and self.registry is not None and not self.registry.loaded:
+            # Without any copy of the registry, approved agents can't be told apart from
+            # unapproved ones: blocking them all would be a mass block. Decide next cycle.
+            self._audit("decision_deferred", d, before=before, recipients=recipients,
+                        reason="registry unavailable and no earlier copy exists", outcome="deferred")
             return 0
 
         approval = self.registry.lookup(d) if (self.registry and shared) else None
@@ -1090,9 +1130,26 @@ class Guard:
         try:
             self.registry.load()
         except Exception as exc:  # keep the last good copy
+            if self.registry.loaded:
+                self._audit("error", stage="registry_load", error=str(exc),
+                            reason="registry could not be loaded; using the last good copy")
+                return
+            snap = self.state.registry_snapshot
+            if snap and isinstance(snap.get("agents"), list):
+                # A fresh process (an Azure Functions invocation) has no copy in memory:
+                # fall back on the one saved in the state. Entries are re-verified.
+                self.registry.apply(snap["agents"], snap.get("hash"))
+                self._audit("error", stage="registry_load", error=str(exc),
+                            reason="registry could not be loaded; using the copy saved in the state",
+                            registryFileHash=snap.get("hash"))
+                self._registry_file_hash = self.registry.file_hash
+                return
             self._audit("error", stage="registry_load", error=str(exc),
-                        reason="registry could not be loaded; using the last good copy")
+                        reason="registry could not be loaded and no earlier copy exists; "
+                               "decisions on shared agents are deferred this cycle")
             return
+        self.state.registry_snapshot = {"agents": self.registry.raw_agents,
+                                        "hash": self.registry.file_hash}
         current = self.registry.entry_hashes()
         previous = self.state.registry_hashes
         for pid in sorted(set(current) | set(previous)):
@@ -1174,6 +1231,7 @@ class Guard:
                 "approvalRef": approval_ref,
                 **(state_extra or {}),
             })
+            self._save_state()      # record it now: a later crash mustn't orphan the block
         self._audit(event, d, before=before,
                     after=self._snapshot(not self.cfg.dry_run, recipients),
                     recipients=recipients, reason=reason, caseId=case_id, ownerId=owner,

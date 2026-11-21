@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Security
+
+- Requesters could approve their own sharing requests: item-level permissions let them edit `Status`, `ApprovedBy`, the criteria and `PolicyJson` on their own item, and the signer trusted those fields. `Provision-AbsgSharePoint.ps1` now gives requesters an *ABSG Submit* permission level (add and read own, no edits). With `signer_trusted_editors` set, the signer also checks each request's version history. It refuses to register a request twice, which could otherwise renew an approval and re-baseline a drifted agent, and treats `RequestedBy` as the requester.
+
+### Fixed
+
+- A cycle that failed part-way, for example when the package list failed on a later page, lost the state of blocks it had already issued. Those agents then looked like admin blocks and were never released. State is now saved after each block and at the end of every cycle, and an unexpected error on one package no longer aborts the cycle.
+- Azure Functions start every invocation with no registry in memory, so one failed registry read blocked every approved, shared agent. The last good registry copy is now kept in the state and re-verified when it's used. With no copy at all, decisions on shared agents are deferred (`decision_deferred`).
+- Audit records that the SharePoint backend couldn't write were lost when the invocation ended. They're now kept in the state and written first by the next invocation, either joined onto the stored chain or dropped if they were written after all.
+
 ### Added
 
 - **Azure deployment.** Azure Functions app (`azure/functionapp`) with a guard role (timer scan, nightly audit chain check) and a separate registry signer role; Bicep template (`azure/infra`) for Flex Consumption, VNet with NAT gateway, private Key Vault (HSM key) and storage, managed identities, role assignments and alerts; provisioning scripts (`azure/scripts`) for Graph permissions, `Sites.Selected` site access, Exchange RBAC for Applications, SharePoint lists and libraries, and the delegated client; `azure/deploy.sh`; [Azure deployment guide](docs/azure-deployment.md).
