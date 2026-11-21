@@ -181,6 +181,11 @@ class Config:
     # column is a Pass / Fail / N/A choice column in the requests list. None = the
     # defaults in absg.signer.CRITERIA (KS01, KS02, DS01, AU01, AC01).
     approval_criteria: list[dict] | None = None
+    # Who may change a sharing request after it's submitted: the approval flow's account
+    # and the reviewers (Entra object ids or UPNs; app ids for applications). When set,
+    # the signer refuses a request whose version history shows an edit by anyone else,
+    # for example the requester changing Status, ApprovedBy or the criteria themselves.
+    signer_trusted_editors: list[str] = field(default_factory=list)
 
     # --- Ownership and lifecycle ------------------------------------------
     # Check owners' Entra accounts (deleted or disabled = inactive). Needs User.Read.All.
@@ -454,8 +459,16 @@ class StateStore:
         # packageId -> hash of the registry entry last seen (to audit changes)
         self.registry_hashes: dict[str, str] = {}
         self.registry_invalid: dict[str, str] = {}
+        # packageId -> signedAt of the newest registry entry seen (rejects rollbacks).
+        # Never pruned: an old entry must stay rejected even after a long absence.
+        self.registry_newest: dict[str, str] = {}
         # packageId -> lifecycle record (inactivity warnings, reactivation, ownerless reports)
         self.lifecycle: dict[str, dict] = {}
+        # Last registry copy that loaded ({"agents": [...], "hash": ...}): entries are
+        # re-verified on use, so a cold start can fall back on it when the source fails.
+        self.registry_snapshot: dict | None = None
+        # Audit records a remote backend couldn't write; written first next time.
+        self.pending_audit: list[dict] = []
         raw = self.backend.load()
         if raw is not None:
             self.data = raw.get("blocked_by_guard", {})
@@ -466,7 +479,10 @@ class StateStore:
             self.validations = raw.get("validations", {})
             self.registry_hashes = raw.get("registry_hashes", {})
             self.registry_invalid = raw.get("registry_invalid", {})
+            self.registry_newest = raw.get("registry_newest", {})
             self.lifecycle = raw.get("lifecycle", {})
+            self.registry_snapshot = raw.get("registry_snapshot")
+            self.pending_audit = raw.get("pending_audit", [])
 
     def is_ours(self, package_id: str) -> bool:
         return package_id in self.data
@@ -489,7 +505,10 @@ class StateStore:
                        "validations": self.validations,
                        "registry_hashes": self.registry_hashes,
                        "registry_invalid": self.registry_invalid,
-                       "lifecycle": self.lifecycle})
+                       "registry_newest": self.registry_newest,
+                       "lifecycle": self.lifecycle,
+                       "registry_snapshot": self.registry_snapshot,
+                       "pending_audit": self.pending_audit})
 
 
 # --------------------------------------------------------------------------
@@ -564,6 +583,11 @@ class AuditLog:
         """Write buffered records (remote backends); a no-op for the local file."""
         with self._lock:
             self.backend.flush()
+
+    def unflushed(self) -> list[dict]:
+        """Records the backend still holds unwritten (remote backends only)."""
+        with self._lock:
+            return [dict(r) for r in getattr(self.backend, "buffer", [])]
 
 
 class FileAuditBackend:
@@ -744,6 +768,8 @@ class Guard:
         self._cycle_id: str | None = None
         self._baselined = 0
         self._status_cache: dict[str, str] = {}
+        # packageId -> new case ID, for a reactivated agent kept blocked because it's shared
+        self._held: dict[str, str] = {}
 
     # -- audit helper -------------------------------------------------------
     def _audit(self, event: str, d: dict | None = None, **fields: Any) -> None:
@@ -783,11 +809,26 @@ class Guard:
         try:
             return self._run_cycle(result, seen, new_blocks)
         finally:
+            # Always runs, even when the cycle aborts part-way: blocks already issued must
+            # stay recorded as ours, or they'd look like admin blocks and never be released.
             if self.audit:
                 try:
                     self.audit.flush()
                 except Exception:
-                    log.exception("Audit flush failed; records are kept and retried next cycle")
+                    log.exception("Audit flush failed; unwritten records are kept in the state")
+                self.state.pending_audit = self.audit.unflushed()
+            # Raise a save failure (e.g. a second writer) unless another error is already on its way out.
+            self._save_state(raise_errors=sys.exc_info()[0] is None)
+
+    def _save_state(self, raise_errors: bool = False) -> None:
+        if self.cfg.dry_run:
+            return
+        try:
+            self.state.save()
+        except Exception:
+            if raise_errors:
+                raise
+            log.exception("State save failed")
 
     def _run_cycle(self, result: CycleResult, seen: set[str], new_blocks: int) -> CycleResult:
         self._sync_registry()
@@ -812,8 +853,9 @@ class Guard:
                 try:
                     detail = self.graph.get_package(pid)
                     new_blocks += self._reconcile(detail, result, new_blocks)
-                except GraphError as exc:
-                    log.error("Failed on package %s: %s", pid, exc)
+                except Exception as exc:   # one bad package must not abort the cycle
+                    log.error("Failed on package %s: %s", pid, exc,
+                              exc_info=not isinstance(exc, GraphError))
                     result.errors.append(pid)
                     self._audit("error", summary, stage="evaluate", error=str(exc))
         except GraphError as exc:
@@ -850,8 +892,6 @@ class Guard:
             self._audit("welcome_baseline", ownersBaselined=self._baselined,
                         reason="first run: existing owners recorded without a welcome email")
 
-        if not self.cfg.dry_run:
-            self.state.save()
         log.info("Cycle done: scanned=%d blocked=%d unblocked=%d reblocked=%d errors=%d",
                  result.scanned, len(result.blocked), len(result.unblocked),
                  len(result.reblocked), len(result.errors))
@@ -944,7 +984,6 @@ class Guard:
         before = self._snapshot(blocked, recipients)
 
         owners, owner_source = self._owners(d, shared)
-        owner = owners[0] if owners else None
         for o in owners:
             self._maybe_welcome(d, o, result)
 
@@ -958,7 +997,31 @@ class Guard:
 
         lifecycle_block = self.state.data.get(pid, {}).get("blockType") if ours else None
         if blocked and lifecycle_block in ("retired", "ownerless"):
-            self._reconcile_lifecycle_block(d, lifecycle_block, owners, recipients, result)
+            held = self._reconcile_lifecycle_block(d, lifecycle_block, owners, recipients, result)
+            if held is None:
+                return 0
+            # The lifecycle reason is gone, but the agent is shared: the normal policy
+            # decides now (an approved, compliant agent is unblocked; otherwise it stays
+            # blocked and the owners get the notice for the new case).
+            issued = self._reconcile_sharing(d, result, new_blocks, recipients, before, blocked, ours,
+                                             owners, owner_source)
+            self._notify_if_still_held(d, held, owners, recipients)
+            return issued
+
+        return self._reconcile_sharing(d, result, new_blocks, recipients, before, blocked, ours,
+                                       owners, owner_source)
+
+    def _reconcile_sharing(self, d: dict, result: CycleResult, new_blocks: int, recipients: list[dict],
+                           before: dict, blocked: bool, ours: bool, owners: list[str],
+                           owner_source: str | None) -> int:
+        pid = d["id"]
+        shared = bool(recipients)
+        owner = owners[0] if owners else None
+        if shared and self.registry is not None and not self.registry.loaded:
+            # Without any copy of the registry, approved agents can't be told apart from
+            # unapproved ones: blocking them all would be a mass block. Decide next cycle.
+            self._audit("decision_deferred", d, before=before, recipients=recipients,
+                        reason="registry unavailable and no earlier copy exists", outcome="deferred")
             return 0
 
         approval = self.registry.lookup(d) if (self.registry and shared) else None
@@ -1090,9 +1153,29 @@ class Guard:
         try:
             self.registry.load()
         except Exception as exc:  # keep the last good copy
+            if self.registry.loaded:
+                self._audit("error", stage="registry_load", error=str(exc),
+                            reason="registry could not be loaded; using the last good copy")
+                return
+            snap = self.state.registry_snapshot
+            if snap and isinstance(snap.get("agents"), list):
+                # A fresh process (an Azure Functions invocation) has no copy in memory:
+                # fall back on the one saved in the state. Entries are re-verified.
+                self.registry.apply(snap["agents"], snap.get("hash"))
+                self._reject_rollbacks()
+                self.state.registry_invalid = dict(self.registry.invalid)
+                self._audit("error", stage="registry_load", error=str(exc),
+                            reason="registry could not be loaded; using the copy saved in the state",
+                            registryFileHash=snap.get("hash"))
+                self._registry_file_hash = self.registry.file_hash
+                return
             self._audit("error", stage="registry_load", error=str(exc),
-                        reason="registry could not be loaded; using the last good copy")
+                        reason="registry could not be loaded and no earlier copy exists; "
+                               "decisions on shared agents are deferred this cycle")
             return
+        self._reject_rollbacks()
+        self.state.registry_snapshot = {"agents": self.registry.raw_agents,
+                                        "hash": self.registry.file_hash}
         current = self.registry.entry_hashes()
         previous = self.state.registry_hashes
         for pid in sorted(set(current) | set(previous)):
@@ -1119,6 +1202,18 @@ class Guard:
         self.state.registry_invalid = dict(self.registry.invalid)
         self.state.registry_hashes = current
         self._registry_file_hash = self.registry.file_hash
+
+    def _reject_rollbacks(self) -> None:
+        for pid in self.registry.reject_rollbacks(self.state.registry_newest):
+            if self.state.registry_invalid.get(pid) == self.registry.invalid[pid]:
+                continue                     # already reported
+            self._audit("registry_rollback_rejected", {"id": pid}, reason=self.registry.invalid[pid],
+                        newestSignedAt=self.state.registry_newest.get(pid))
+            self.notify("registry_rollback_rejected", {"packageId": pid, "reason": self.registry.invalid[pid]})
+            self._admin_alert({"id": pid}, None, "Registry entry rejected: an earlier entry was put back", {
+                "Problem": self.registry.invalid[pid],
+                "Next step": "Find who restored the entry (list version history); the agent is treated "
+                             "as unapproved until the signer writes a current entry"})
 
     # -- block --------------------------------------------------------------
     def _block(self, d: dict, result: CycleResult, recipients: list[dict], owner: str | None,
@@ -1174,6 +1269,7 @@ class Guard:
                 "approvalRef": approval_ref,
                 **(state_extra or {}),
             })
+            self._save_state()      # record it now: a later crash mustn't orphan the block
         self._audit(event, d, before=before,
                     after=self._snapshot(not self.cfg.dry_run, recipients),
                     recipients=recipients, reason=reason, caseId=case_id, ownerId=owner,
@@ -1700,28 +1796,76 @@ class Guard:
         self.notify("deleted", {"packageId": pid, "displayName": entry.get("displayName"),
                                 "archive": entry.get("archiveReference")})
 
+    # State keys that only make sense while an agent is retired.
+    _RETIREMENT_KEYS = ("retiredAt", "lastActivity", "archiveOn", "archivedAt", "archiveReference",
+                        "archiveLocation", "archiveFailedAt", "deletionRequestedAt", "deletionReminderAt",
+                        "deletionSubmittedAt", "deletionApiFailed")
+
     def _reconcile_lifecycle_block(self, d: dict, block_type: str, owners: list[str],
-                                   recipients: list[dict], result: CycleResult) -> None:
-        """A retired or ownerless agent this guard blocked: release it when that's allowed."""
+                                   recipients: list[dict], result: CycleResult) -> str | None:
+        """A retired or ownerless agent this guard blocked: release it when that's allowed.
+
+        Returns the new case ID when the lifecycle reason is gone but the agent is still
+        shared, so it's now held under the sharing policy instead; otherwise None."""
         entry = self.state.data.get(d["id"], {})
         if block_type == "ownerless":
             active = [o for o in owners if self._status(o) == "active"]
             if active:
                 if self.state.is_ours(d["id"]):
                     entry["ownerId"] = active[0]
-                self._unblock(d, result, recipients, reason="an active owner is assigned again")
-            return
+                reason = "an active owner is assigned again"
+                if recipients:
+                    return self._hold_for_sharing(d, owners, recipients, reason)
+                self._unblock(d, result, recipients, reason=reason)
+            return None
         self._process_acks(d, recipients, result)          # reactivation requests
+        held = self._held.pop(d["id"], None)
+        if held:
+            return held
         if self.state.is_ours(d["id"]) and self.state.data[d["id"]].get("blockType") == "retired":
             self._retirement_progress(d, self.state.data[d["id"]], owners, result)
+        return None
+
+    def _hold_for_sharing(self, d: dict, owners: list[str], recipients: list[dict], reason: str,
+                          on_behalf_of: str | None = None) -> str:
+        """Keep a lifecycle-blocked agent blocked because it's shared: the block becomes a
+        sharing block with a new case, and the usual policy takes it from here."""
+        pid = d["id"]
+        entry = self.state.data[pid]
+        previous_case, previous_type = entry.get("caseId"), entry.get("blockType")
+        case_id = uuid.uuid4().hex
+        for k in self._RETIREMENT_KEYS:
+            entry.pop(k, None)
+        entry.update({"blockType": "sharing", "caseId": case_id, "sharedWith": recipients,
+                      "violations": None, "violationsFingerprint": None, "ackTokenId": None,
+                      "ownerIds": owners or entry.get("ownerIds"),
+                      "ownerId": entry.get("ownerId") or (owners[0] if owners else None)})
+        self._audit("block_reason_changed", d, caseId=case_id, previousCaseId=previous_case,
+                    previousBlockType=previous_type, blockType="sharing", recipients=recipients,
+                    onBehalfOf=on_behalf_of,
+                    reason=f"{reason}, but the agent is shared: it stays blocked under the sharing policy")
+        return case_id
+
+    def _notify_if_still_held(self, d: dict, case_id: str, owners: list[str], recipients: list[dict]) -> None:
+        entry = self.state.data.get(d["id"])
+        if not entry or entry.get("caseId") != case_id:
+            return                              # released (e.g. approved and compliant)
+        approval = self.registry.lookup(d) if self.registry else None
+        self._send_notice(d, owners or entry.get("ownerIds") or entry.get("ownerId"), recipients, case_id,
+                          entry.get("blockType") or "sharing", entry.get("violations"),
+                          approval.entry if approval is not None and approval.valid else None)
 
     def _reactivate(self, d: dict, ack: dict, recipients: list[dict], result: CycleResult) -> None:
         pid, case_id = d["id"], ack["caseId"]
         entry = dict(self.state.data.get(pid, {}))
         self._audit("reactivation_requested", d, caseId=case_id, ownerId=ack["ownerId"],
                     ackTokenId=ack.get("tokenId"), ackReceivedAt=ack.get("receivedAt"))
-        self._unblock(d, result, recipients, case_id=case_id, on_behalf_of=ack["ownerId"],
-                      reason="owner reactivated a retired agent")
+        reason = "owner reactivated a retired agent"
+        if recipients:
+            # Reactivation lifts the retirement, not the no-sharing policy.
+            self._held[pid] = self._hold_for_sharing(d, [], recipients, reason, on_behalf_of=ack["ownerId"])
+        else:
+            self._unblock(d, result, recipients, case_id=case_id, on_behalf_of=ack["ownerId"], reason=reason)
         if not self.cfg.dry_run:
             lc = self.state.lifecycle.setdefault(pid, {})
             lc.update({"reactivatedAt": datetime.now(timezone.utc).isoformat()})

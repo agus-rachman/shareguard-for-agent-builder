@@ -377,3 +377,97 @@ def test_rs256_keygen_and_jwk_export_cli(tmp_path, capsys):
     detail = {"id": "p1", "displayName": "A", "elementDetails": []}
     entry = sign_entry(draft_entry(detail, "owner-1", []), priv)
     assert verify_entry(entry, pub_jwk)
+
+
+# ---- Registry unavailable on a cold start (Azure Functions) ---------------------
+def test_cold_start_registry_failure_uses_snapshot_from_state(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    assert guard.run_cycle().approved_compliant == ["hr"]
+
+    # New process (fresh Registry, state reloaded from disk); the registry source fails.
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.approved_compliant == ["hr"] and r.blocked == []
+    assert not tenant.packages["hr"].get("isBlocked")
+    assert any("copy saved in the state" in e.get("reason", "") for e in recs(audit, "error"))
+
+
+def test_snapshot_entries_are_reverified(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    guard.run_cycle()
+    state = json.loads((tmp_path / "state.json").read_text())
+    state["registry_snapshot"]["agents"][0]["sharing"]["allowedPrincipals"].append(
+        {"resourceType": "group", "resourceId": "everyone"})      # tampered snapshot
+    (tmp_path / "state.json").write_text(json.dumps(state))
+
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.approved_compliant == [] and r.blocked == ["hr"]
+
+
+def test_cold_start_without_any_registry_copy_defers_instead_of_mass_blocking(env, keys, tmp_path):
+    a = hr_agent()
+    guard, tenant, audit = env([a], [make_entry(a, keys)])
+    os.remove(tmp_path / "registry.json")
+    r = guard.run_cycle()
+    assert r.blocked == [] and not tenant.packages["hr"].get("isBlocked")
+    assert [x["package"]["id"] for x in recs(audit, "decision_deferred")] == ["hr"]
+
+
+# ---- Rollback: an earlier signed entry put back -----------------------------------
+def test_restoring_an_approval_after_revocation_is_rejected(env, keys):
+    a = hr_agent()
+    approved = make_entry(a, keys)
+    guard, tenant, audit = env([a], [approved])
+    assert guard.run_cycle().approved_compliant == ["hr"]
+
+    revoked = make_entry(a, keys, mutate=lambda e: e.update(status="revoked"))
+    env.write_registry([revoked])
+    assert guard.run_cycle().blocked == ["hr"]
+
+    env.write_registry([approved])                 # someone restores the earlier version
+    r = guard.run_cycle()
+    assert r.approved_compliant == [] and tenant.packages["hr"]["isBlocked"]
+    (rec,) = recs(audit, "registry_rollback_rejected")
+    assert rec["package"]["id"] == "hr" and "earlier entry was put back" in rec["reason"]
+    assert any("put back" in x.get("subject", "") for x in recs(audit, "admin_alert_sent"))
+
+
+def test_rollback_is_rejected_by_a_new_process_too(env, keys):
+    a = hr_agent()
+    approved = make_entry(a, keys)
+    revoked = make_entry(a, keys, mutate=lambda e: e.update(status="revoked"))
+    guard, tenant, _ = env([a], [revoked])
+    guard.run_cycle()
+
+    assert tenant.packages["hr"]["isBlocked"]
+    guard, tenant, _ = env([a], [approved])        # fresh Registry, state reloaded from disk
+    r = guard.run_cycle()
+    assert r.approved_compliant == [] and r.unblocked == [] and tenant.packages["hr"]["isBlocked"]
+    assert "older than one already seen" in guard.registry.lookup(a).reason
+
+
+def test_entry_without_signed_at_is_rejected_once_a_dated_one_was_seen(env, keys):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    guard.run_cycle()
+    legacy = make_entry(a, keys)
+    legacy.pop("signedAt")
+    legacy = sign_entry(legacy, keys[0])
+    legacy.pop("signedAt")                         # an entry signed before signedAt existed
+    env.write_registry([legacy])
+    assert guard.run_cycle().blocked == ["hr"]
+
+
+def test_newer_entry_replaces_older_one(env, keys):
+    a = hr_agent()
+    guard, tenant, _ = env([a], [make_entry(a, keys)])
+    guard.run_cycle()
+    renewed = make_entry(a, keys, mutate=lambda e: e["approval"].update(requestId="GOV-2001"))
+    env.write_registry([renewed])
+    assert guard.run_cycle().approved_compliant == ["hr"]
+    assert guard.state.registry_newest["hr"] == renewed["signedAt"]

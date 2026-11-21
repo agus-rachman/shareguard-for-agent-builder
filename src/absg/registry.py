@@ -138,6 +138,33 @@ def build_profile(detail: dict,
     }
 
 
+def profile_summary(profile: dict | None, limit: int = 4000) -> str:
+    """A plain-text summary of a configuration profile, for reviewers."""
+    if profile is None:
+        return "The agent's definition couldn't be read."
+    caps = profile.get("capabilities") or {}
+    lines = []
+    for name in sorted(caps):
+        scope = caps[name] or {}
+        where = scope.get("urls") or scope.get("sites") or scope.get("connections") or scope.get("folders")
+        if scope.get("unscoped"):
+            lines.append(f"- {name}: unscoped (everything the user can access)")
+        elif where:
+            lines.append(f"- {name}: " + ", ".join(where))
+        elif scope.get("itemIds"):
+            lines.append(f"- {name}: {len(scope['itemIds'])} selected item(s)")
+        else:
+            lines.append(f"- {name}")
+    out = ["Capabilities and knowledge:", *(lines or ["- none"]),
+           "Embedded files: " + (", ".join(profile.get("embeddedFiles") or []) or "none"),
+           "Actions: " + (", ".join(profile.get("actions") or []) or "none"),
+           f"Worker agents: {len(profile.get('workerAgents') or [])}",
+           f"Instructions hash: {str(profile.get('instructionsHash', ''))[:12]}",
+           f"Configuration hash: {sha256(profile)[:12]}"]
+    text = "\n".join(out)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 # --------------------------------------------------------------------------
 # Registry entries and signatures
 # --------------------------------------------------------------------------
@@ -202,6 +229,7 @@ def sign_entry(entry: dict, private_key_pem: bytes) -> dict:
     signed = copy.deepcopy(entry)
     signed.pop("signature", None)
     signed["signatureAlgorithm"] = _algorithm_name(key)
+    signed["signedAt"] = datetime.now(timezone.utc).isoformat()   # orders entries: see reject_rollbacks
     signed["signature"] = base64.b64encode(_sign_bytes(key, signing_payload(signed))).decode()
     return signed
 
@@ -355,16 +383,25 @@ class Registry:
         self.entries: dict[str, dict] = {}
         self.invalid: dict[str, str] = {}
         self.file_hash: str | None = None
+        self.loaded = False                   # True once a copy has loaded in this process
+        self.raw_agents: list[Any] = []       # what was loaded, for the guard's state snapshot
 
     def load(self) -> None:
         """Parse the registry. On any error the previous (last good) copy is
         kept and the exception is raised for the caller to audit."""
         agents, raw_hash = self.source.fetch()
+        self.apply(agents, raw_hash)
+
+    def apply(self, agents: list[Any], raw_hash: str | None) -> None:
+        """Use these entries (from the source, or a saved snapshot). Signatures are
+        checked here, so a snapshot can't approve anything the source didn't."""
         entries: dict[str, dict] = {}
         invalid: dict[str, str] = {}
         for entry in agents:
-            if isinstance(entry, tuple):          # (key, None): an item that isn't valid JSON
-                invalid[entry[0]] = "entry is not valid JSON"
+            if isinstance(entry, (tuple, list)):  # (key, None): an item that isn't valid JSON
+                invalid[str(entry[0])] = "entry is not valid JSON"
+                continue
+            if not isinstance(entry, dict):
                 continue
             pid = entry.get("packageId")
             if not pid:
@@ -375,6 +412,28 @@ class Registry:
             entries[pid] = entry
         self.entries, self.invalid = entries, invalid
         self.file_hash = raw_hash
+        self.raw_agents = [list(a) if isinstance(a, tuple) else a for a in agents]
+        self.loaded = True
+
+    def reject_rollbacks(self, newest_seen: dict[str, str]) -> list[str]:
+        """Reject entries signed before one already seen for the same agent.
+
+        A signature proves who wrote an entry, not that it's the latest: anyone who can
+        edit the registry could put back an earlier ``approved`` entry (SharePoint keeps
+        version history) after it was revoked. ``newest_seen`` (packageId -> ``signedAt``)
+        is kept by the guard, outside the registry, and is updated here."""
+        rejected = []
+        for pid, entry in list(self.entries.items()):
+            signed_at = str(entry.get("signedAt") or "")
+            seen = newest_seen.get(pid, "")
+            if signed_at < seen:
+                self.invalid[pid] = (f"entry signed {signed_at or 'without a date'} is older than one already "
+                                     f"seen (signed {seen}): an earlier entry was put back")
+                del self.entries[pid]
+                rejected.append(pid)
+            elif signed_at:
+                newest_seen[pid] = signed_at
+        return rejected
 
     def lookup(self, detail: dict) -> Approval | None:
         pid = detail.get("id")
