@@ -156,6 +156,7 @@ Useful commands:
 - [Operations guide](docs/operations-guide.md): behaviour, configuration, registry, emails, acknowledgement flow, audit trail and pilot checklist
 - [Customisation guide](docs/customisation.md): one place for names, schedules, lifecycle periods, approval criteria, email wording and forms
 - [Azure deployment guide](docs/azure-deployment.md): step-by-step deployment to Azure Functions with SharePoint, Exchange Online and Key Vault, including the acknowledgement and review flows
+- [Test environment setup](docs/test-environment-setup.md): an end-to-end test environment in a separate tenant, with test scenarios and expected results, plus a local Windows option for testers without an Azure subscription
 - [Deployment architecture for Microsoft 365](docs/deployment-architecture.md): the design behind it, inside your tenant boundary
 - [Naming convention](docs/naming-convention.md)
 - [Example configuration](examples/config.example.json) and [example registry entry](examples/registry.example.json)

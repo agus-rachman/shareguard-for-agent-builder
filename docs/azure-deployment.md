@@ -1,6 +1,6 @@
 # Azure deployment guide
 
-How to deploy ShareGuard for Agent Builder to Azure Functions, with SharePoint Online for state, audit, registry and acknowledgements, Exchange Online for email and Key Vault for secrets and the registry signing key. The design and its reasoning are in [deployment-architecture.md](deployment-architecture.md); this guide is the step-by-step.
+How to deploy ShareGuard for Agent Builder to Azure Functions, with SharePoint Online for state, audit, registry and acknowledgements, Exchange Online for email and Key Vault for secrets and the registry signing key. The design and its reasoning are in [deployment-architecture.md](deployment-architecture.md); this guide is the step-by-step. To build a test environment first, with test scenarios and expected results (or to test locally on Windows without Azure), follow the [test environment setup](test-environment-setup.md).
 
 > **Status: pilot-ready, not production-proven.** The Python code is covered by the test suite. The Bicep template and PowerShell scripts haven't yet been run against a real tenant: expect to fix small issues on the first deployment, and please report them.
 
