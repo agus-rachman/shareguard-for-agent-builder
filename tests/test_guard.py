@@ -423,3 +423,31 @@ def test_block_identity_is_validated(tmp_path):
     p.write_text(json.dumps({"tenant_id": "t", "client_id": "c", "client_secret": "s", "block_identity": "root"}))
     with pytest.raises(ValueError, match="block_identity"):
         Config.load(str(p))
+
+
+def test_reassign_uses_the_delegated_account(cfg):
+    from absg.mail import OwnerResolver
+    cfg.ownerless_action = "reassign_to_manager"
+    cfg.delegated_username = "svc-absg@contoso.com"
+
+    class Directory(FakeGraph):
+        def user_status(self, uid):
+            return {"u-1": "disabled", "mgr": "active"}.get(uid, "deleted")
+
+        def manager_of(self, uid):
+            return "mgr" if uid == "u-1" else None
+
+        def reassign(self, pid, uid):
+            self.calls.append(("reassign", pid, uid))
+
+    class DelegatedDirectory(DelegatedGraph):
+        def reassign(self, pid, uid):
+            self.calls.append(("reassign", pid, uid))
+
+    graph = Directory([pkg("a", allowedUsersAndGroups=[{"resourceType": "user", "resourceId": "u-1"}])])
+    delegated = DelegatedDirectory(graph)
+    state = StateStore(cfg.state_file)
+    guard = Guard(cfg, graph, state, owner_resolver=OwnerResolver([], None, state.package_owners),
+                  delegated_graph=delegated)
+    assert guard.run_cycle().reassigned == ["a"]
+    assert delegated.calls == [("reassign", "a", "mgr")] and graph.calls == []

@@ -52,7 +52,7 @@ It saves the IDs of agents it blocked to a state file, so it only ever unblocks 
    | `User.Read.All` | Look up owners' names, email addresses and account status |
    | `GroupMember.Read.All` | Show the names of the groups an agent was shared with, in the notice |
 
-3. **Delegated identity for blocking, unblocking and removing sharing.** Microsoft documents block, unblock and update (`PATCH`) with **delegated permissions only**. So ShareGuard makes those calls as a service account (`block_identity: "delegated"`, the default), and you need:
+3. **Delegated identity for blocking, unblocking, reassigning and removing sharing.** Microsoft documents block, unblock, reassign and update (`PATCH`) with **delegated permissions only**. So ShareGuard makes those calls as a service account (`block_identity: "delegated"`, the default), and you need:
    - A **public client app registration** with the delegated permission `CopilotPackages.ReadWrite.All`, and "Allow public client flows" turned on.
    - A **dedicated service account** (for example `svc-absg@`) holding an admin role that can manage agents. Use the least-privileged role that works in your pilot.
    - A one-off sign-in: `absg --config config.json --login-delegated` (device code). After that, the daemon refreshes the token silently from `delegated_token_cache`. Store the cache like a secret (it's written with mode 600). If Conditional Access sign-in frequency or token revocation expires the session, the daemon records the failure and falls back to admin escalation. Run `--login-delegated` again to restore it.
@@ -258,7 +258,7 @@ Every decision and action the guard takes is written to `audit_file` (default `a
 | `event` | **Enforcement:** `block`, `reblock`, `unblock`, `block_deferred`, `exempt_skip`, `state_forget`, `circuit_breaker`, `error`, `no_action` (optional)<br>**Owners and email:** `owner_resolved`, `owner_unknown`, `welcome_baseline`, `welcome_email_sent`, `notice_email_sent`, `restored_email_sent`, `admin_alert_sent`, `email_failed`<br>**Registry and drift:** `registry_entry_added`, `registry_entry_updated`, `registry_entry_removed`, `registry_entry_invalid`, `registry_validation`, `violation_updated`<br>**Acknowledgement:** `ack_received`, `ack_rejected`, `ack_stale`, `ack_closed`, `ack_escalated`, `sharing_removal`, `sharing_removal_unverified`<br>**Ownership and lifecycle:** `ownerless_detected`, `ownership_reassigned`, `ownership_email_sent`, `inactivity_warning`, `inactivity_reminder`, `inactivity_cleared`, `reactivation_requested` (retirements are `block` records with `blockType: retired`), `agent_archived`, `archive_failed`, `archived_email_sent`, `deletion_requested`, `deletion_reminder`, `deletion_submitted`, `deletion_failed`, `deletion_unverified`, `deletion_cancelled`, `agent_deleted`<br>**Daemon:** `daemon_start`, `daemon_stop`, `invocation_start`, `cycle_start`, `cycle_end`, `audit_integrity_failure` |
 | `caseId` | Links every record about one block: block, notice, link token, acknowledgement, removal, unblock, restored email |
 | `onBehalfOf` | On `sharing_removal` and `unblock`: the owner the guard acted for |
-| `actingIdentity` | On `block`, `unblock` and `sharing_removal`: who made the call (the delegated service account, or `application`) |
+| `actingIdentity` | On `block`, `unblock`, `ownership_reassigned` and `sharing_removal`: who made the call (the delegated service account, or `application`) |
 | `ackTokenId`, `ackReceivedAt`, `signedInUser`, `identityVerified`, `remoteAddr`, `userAgent` | Evidence of who acknowledged, when and from where |
 | `removedRecipients` | Exactly which sharing the guard removed |
 | `email` | Template, recipients, subject and send time for each email |
@@ -315,7 +315,7 @@ These behaviours aren't fully documented. Check each one in a test tenant or wit
 6. **Propagation delay.** Measure how long a share takes to show up in the API, and how long a block takes to reach users. Set `poll_interval_seconds` with that in mind.
 7. **`availableTo` values** for unshared Agent Builder agents (`some` / `none`). Confirm that `all` only appears for org-wide shares.
 8. **Owners and usage fields.** Check whether the package detail exposes owners (set `owner_fields`) and whether `lastUsedDateTime` is populated for Agent Builder agents before turning on `inactivity_days`. Check too whether a deleted (soft-deleted) agent disappears from the package list, which is how ShareGuard confirms a deletion.
-9. **Reassignment.** If you use `reassign_to_manager`, try `POST …/reassign` on a test agent with the guard's identity first.
+9. **Reassignment.** If you use `reassign_to_manager`, try `POST …/reassign` on a test agent with the delegated account first: like block and unblock, it runs as that account.
 10. **API versions and app-only writes.** Reads (list, get) use v1.0; block, unblock, update and reassign use `/beta`, the only version Microsoft documents them in. Microsoft's pages for these write methods list delegated permissions only, so expect 401 or 403 from the guard's app-only block and unblock calls. Check this first. If they're refused, enforcement can't work app-only until Microsoft adds application support. If your tenant only exposes the reads under `/beta` too, set `graph_base` to the beta URL. Beta isn't supported for production.
 
 ## Known limitation

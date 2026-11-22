@@ -136,11 +136,11 @@ Segregation of duties: requesters can't approve; reviewers can't sign or write t
 | --- | --- | --- | --- |
 | **Guard** (`id-absg-guard-prod`) | User-assigned managed identity | Graph: `CopilotPackages.ReadWrite.All`, `User.Read.All`, `GroupMember.Read.All`, `Sites.Selected` (write on the Operations and archive sites, read on the Registry site). Exchange: `Application Mail.Send` (scoped). Key Vault: read two secrets; verify only on the registry key | Write the registry; sign entries; send from other mailboxes |
 | **Registry signer** (`id-absg-signer-prod`) | User-assigned managed identity, own Function app | Key Vault: sign on the registry key. Graph: `Sites.Selected` (write on the Registry site), `CopilotPackages.Read.All`, `User.Read.All` | Block or unblock agents; send mail |
-| **Delegated account** (`svc-absg@`) | Cloud-only user | Blocks, unblocks and removes sharing. Delegated `CopilotPackages.ReadWrite.All` through a single-tenant public client app; least-privileged admin role that can manage agents | Sign in from anywhere but the NAT IP |
+| **Delegated account** (`svc-absg@`) | Cloud-only user | Blocks, unblocks, reassigns and removes sharing. Delegated `CopilotPackages.ReadWrite.All` through a single-tenant public client app; least-privileged admin role that can manage agents | Sign in from anywhere but the NAT IP |
 | **Acknowledgement flow** (`svc-absg-flow@`) | Power Automate connection account | Contribute on *Agent Acknowledgements* only | Read anything else |
 | **People** | Entra groups (`ABSG - Governance Reviewers`, `ABSG - Operators`, break-glass) | Site and list permissions; PIM for any admin role | Edit the audit library (records label) |
 
-The delegated account is the main residual risk. It's a user account with an admin role, because Microsoft documents the block, unblock and update APIs with delegated permissions only. Enforcement depends on it: if its token expires, the guard can't block until it's signed in again. Mitigate it with Conditional Access, a token kept only in Key Vault, sign-in alerting and quarterly access reviews.
+The delegated account is the main residual risk. It's a user account with an admin role, because Microsoft documents the block, unblock, reassign and update APIs with delegated permissions only. Enforcement depends on it: if its token expires, the guard can't block until it's signed in again. Mitigate it with Conditional Access, a token kept only in Key Vault, sign-in alerting and quarterly access reviews.
 
 > **Check access early.** The guard reads agents app-only and writes as the delegated account. If your tenant refuses app-only reads too, every guard call needs the delegated account, which this deployment doesn't support yet.
 

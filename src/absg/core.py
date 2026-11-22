@@ -147,8 +147,8 @@ class Config:
     delegated_token_cache: str = "absg_delegated_cache.json"  # noqa: S105 - a file path, not a secret
     delegated_username: str | None = None     # service account UPN
     removal_available_to_value: str = "allowedForSome"
-    # Who calls block and unblock. Microsoft documents those methods with delegated
-    # permissions only, so by default they run as the delegated account above:
+    # Who calls block, unblock and reassign. Microsoft documents those methods with
+    # delegated permissions only, so by default they run as the delegated account above:
     # "delegated" (falls back to the application, with a warning, when no delegated
     # client is configured) or "application" (only if your tenant accepts app-only calls).
     block_identity: str = "delegated"
@@ -777,7 +777,7 @@ class Guard:
         self.signer = signer
         self.acks = acks
         self.delegated = delegated_graph
-        # The identity that blocks and unblocks (see Config.block_identity).
+        # The identity that blocks, unblocks and reassigns (see Config.block_identity).
         self.blocker: Any = graph
         self.blocker_identity = "application"
         if cfg.block_identity == "delegated":
@@ -786,7 +786,7 @@ class Guard:
                 self.blocker_identity = cfg.delegated_username or "delegated"
             else:
                 log.warning("block_identity is delegated, but no delegated client is configured: "
-                            "blocking and unblocking as the application, which Microsoft may refuse")
+                            "blocking, unblocking and reassigning as the application, which Microsoft may refuse")
         self._write_auth_alerted = False
         self.registry = registry
         if archive is None and self._archiving:
@@ -1333,7 +1333,7 @@ class Guard:
         delegated = self.blocker is self.delegated and self.delegated is not None
         self._audit("enforcement_identity_failed", d, actingIdentity=self.blocker_identity,
                     status=exc.status, error=str(exc)[:500],
-                    reason="block or unblock refused: agents can't be blocked or released until this is fixed")
+                    reason="block, unblock or reassign refused: agents can't be blocked or released until this is fixed")
         self.notify("enforcement_identity_failed", {"identity": self.blocker_identity, "status": exc.status})
         self._admin_alert(d, None, "ShareGuard can't block or unblock agents", {
             "Identity": self.blocker_identity, "Error": str(exc)[:300],
@@ -1553,16 +1553,18 @@ class Guard:
                 outcome = "simulated"
                 if not self.cfg.dry_run:
                     try:
-                        self.graph.reassign(pid, manager)
+                        self.blocker.reassign(pid, manager)
                         outcome = "success"
                     except GraphError as exc:
                         self._audit("ownership_reassigned", d, previousOwners=owners, newOwner=manager,
                                     ownerStatus=statuses, outcome="failed", error=str(exc),
+                                    actingIdentity=self.blocker_identity,
                                     reason="no owner has an active account")
+                        self._alert_write_auth(d, exc)
                         break
                     self.state.package_owners[pid] = manager
                 self._audit("ownership_reassigned", d, previousOwners=owners, newOwner=manager,
-                            ownerStatus=statuses, outcome=outcome,
+                            ownerStatus=statuses, outcome=outcome, actingIdentity=self.blocker_identity,
                             reason="no owner has an active account; reassigned to a former owner's manager")
                 result.reassigned.append(pid)
                 lc.pop("ownerlessReported", None)
