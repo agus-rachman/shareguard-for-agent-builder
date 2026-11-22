@@ -26,12 +26,15 @@ Policy
 
 Microsoft APIs used (Microsoft Graph)
 -------------------------------------
-  GET   /copilot/admin/catalog/packages?$filter=platform eq '...Agent Builder'
-  GET   /copilot/admin/catalog/packages/{id}
-  POST  /copilot/admin/catalog/packages/{id}/block | /unblock   (application)
-  PATCH /copilot/admin/catalog/packages/{id}                    (delegated only)
-  GET   /users/{id}, /directoryObjects/{id}
-  POST  /users/{sender}/sendMail
+  v1.0  GET   /copilot/admin/catalog/packages?$filter=platform eq '...Agent Builder'
+  v1.0  GET   /copilot/admin/catalog/packages/{id}
+  beta  POST  /copilot/admin/catalog/packages/{id}/block | /unblock | /reassign
+  beta  PATCH /copilot/admin/catalog/packages/{id}                    (delegated only)
+  v1.0  GET   /users/{id}, /directoryObjects/{id}
+  v1.0  POST  /users/{sender}/sendMail
+
+The package write methods are documented only under /beta (preview, subject to
+change); graph_beta_base sets where they're sent. Everything else uses graph_base.
 
 Requires a Microsoft Agent 365 licence. See README for the permissions.
 
@@ -76,6 +79,9 @@ class Config:
     cert_path: str | None = None              # PEM with private key
     cert_thumbprint: str | None = None
     graph_base: str = "https://graph.microsoft.com/v1.0"
+    # The Package Management API's write methods (update, block, unblock, reassign)
+    # are documented only under /beta; reads (list, get) stay on graph_base (v1.0).
+    graph_beta_base: str = "https://graph.microsoft.com/beta"
     # Authenticate as an Azure managed identity (client_id = the user-assigned
     # identity's client ID) instead of a client secret or certificate.
     use_managed_identity: bool = False
@@ -141,6 +147,11 @@ class Config:
     delegated_token_cache: str = "absg_delegated_cache.json"  # noqa: S105 - a file path, not a secret
     delegated_username: str | None = None     # service account UPN
     removal_available_to_value: str = "allowedForSome"
+    # Who calls block, unblock and reassign. Microsoft documents those methods with
+    # delegated permissions only, so by default they run as the delegated account above:
+    # "delegated" (falls back to the application, with a warning, when no delegated
+    # client is configured) or "application" (only if your tenant accepts app-only calls).
+    block_identity: str = "delegated"
 
     # --- Approved-agent registry and drift detection --------------------
     registry_file: str | None = None          # signed whitelist maintained by governance
@@ -221,7 +232,7 @@ class Config:
     # call, verified; falls back to manual), or "none" (archive only, stays blocked).
     deletion_mode: str = "manual"
     deletion_reminder_days: int = 7
-    deletion_api_path: str = "/copilot/admin/catalog/packages/{id}"
+    deletion_api_path: str = "/copilot/admin/catalog/packages/{id}"   # relative = under graph_beta_base
 
     # --- Email ----------------------------------------------------------------
     # Name shown in emails, an optional subject prefix (for example "[IT]"), footer text
@@ -287,6 +298,8 @@ class Config:
             raise ValueError("inactivity_reminder_days must be 0 or less than inactivity_notice_days")
         if cfg.archive_after_days is not None and cfg.archive_after_days < 0:
             raise ValueError("archive_after_days must be 0 or more (or null to never archive)")
+        if cfg.block_identity not in ("delegated", "application"):
+            raise ValueError("block_identity must be delegated or application")
         if cfg.deletion_mode not in ("manual", "api", "none"):
             raise ValueError("deletion_mode must be manual, api or none")
         for c in cfg.approval_criteria or []:
@@ -389,14 +402,19 @@ class GraphClient:
     def get_package(self, package_id: str) -> dict:
         return self.request("GET", f"/copilot/admin/catalog/packages/{package_id}").json()
 
+    def beta(self, path: str) -> str:
+        """Full /beta URL for a path (used for methods Microsoft documents only in beta)."""
+        return self.cfg.graph_beta_base.rstrip("/") + path
+
+    # block, unblock, reassign and update are documented only under /beta (preview).
     def block(self, package_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/block")
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/block"))
 
     def unblock(self, package_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/unblock")
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/unblock"))
 
     def reassign(self, package_id: str, user_id: str) -> None:
-        self.request("POST", f"/copilot/admin/catalog/packages/{package_id}/reassign",
+        self.request("POST", self.beta(f"/copilot/admin/catalog/packages/{package_id}/reassign"),
                      json={"userId": user_id})
 
     def user_status(self, user_id: str) -> str:
@@ -416,7 +434,7 @@ class GraphClient:
     def update_package(self, package_id: str, body: dict) -> None:
         # Delegated permission only (CopilotPackages.ReadWrite.All); call this on
         # a GraphClient built with a delegated token provider.
-        self.request("PATCH", f"/copilot/admin/catalog/packages/{package_id}", json=body)
+        self.request("PATCH", self.beta(f"/copilot/admin/catalog/packages/{package_id}"), json=body)
 
 
 # --------------------------------------------------------------------------
@@ -759,6 +777,17 @@ class Guard:
         self.signer = signer
         self.acks = acks
         self.delegated = delegated_graph
+        # The identity that blocks, unblocks and reassigns (see Config.block_identity).
+        self.blocker: Any = graph
+        self.blocker_identity = "application"
+        if cfg.block_identity == "delegated":
+            if delegated_graph is not None:
+                self.blocker = delegated_graph
+                self.blocker_identity = cfg.delegated_username or "delegated"
+            else:
+                log.warning("block_identity is delegated, but no delegated client is configured: "
+                            "blocking, unblocking and reassigning as the application, which Microsoft may refuse")
+        self._write_auth_alerted = False
         self.registry = registry
         if archive is None and self._archiving:
             from .archive import FileArchiveStore
@@ -806,6 +835,7 @@ class Guard:
         self._baselined = 0
         self._status_cache = {}
         self._cycle_id = uuid.uuid4().hex
+        self._write_auth_alerted = False
         try:
             return self._run_cycle(result, seen, new_blocks)
         finally:
@@ -843,6 +873,7 @@ class Guard:
             "exemptIds": self.cfg.exempt_ids,
             "ignorePrincipalIds": self.cfg.ignore_principal_ids,
             "treatAvailableToAllAsShared": self.cfg.treat_available_to_all_as_shared,
+            "blockIdentity": self.blocker_identity,
         })
 
         try:
@@ -1247,12 +1278,14 @@ class Guard:
         log.warning("%s %s (%s) [%s]: %s", event.upper(), pid, name, block_type, reason)
         if not self.cfg.dry_run:
             try:
-                self.graph.block(pid)
+                self.blocker.block(pid)
             except GraphError as exc:
                 log.error("Block failed for %s: %s", pid, exc)
                 self._audit(event, d, before=before, after=before, recipients=recipients,
                             blockType=block_type, violations=violations, reason=reason,
-                            caseId=case_id, outcome="failed", error=str(exc))
+                            caseId=case_id, outcome="failed", error=str(exc),
+                            actingIdentity=self.blocker_identity)
+                self._alert_write_auth(d, exc)
                 result.errors.append(pid)
                 return 0
             self.state.record_block(pid, {
@@ -1277,6 +1310,7 @@ class Guard:
                     blockType=block_type, violations=violations, approvalRef=approval_ref,
                     approvalStatus=approval_status,
                     configHash=evaluation.config_hash if evaluation else None,
+                    actingIdentity=self.blocker_identity,
                     outcome="simulated" if self.cfg.dry_run else "success", **(extra or {}))
         (result.reblocked if ours else result.blocked).append(pid)
         if block_type == "drift":
@@ -1289,6 +1323,24 @@ class Guard:
                                 "caseId": case_id, "dryRun": self.cfg.dry_run})
         self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
         return 1
+
+    def _alert_write_auth(self, d: dict, exc: GraphError) -> None:
+        """Once a cycle: the blocking identity was refused (sign-in expired, missing role,
+        or app-only refused), so enforcement isn't working. Tell the admins."""
+        if exc.status not in (401, 403) or self._write_auth_alerted:
+            return
+        self._write_auth_alerted = True
+        delegated = self.blocker is self.delegated and self.delegated is not None
+        self._audit("enforcement_identity_failed", d, actingIdentity=self.blocker_identity,
+                    status=exc.status, error=str(exc)[:500],
+                    reason="block, unblock or reassign refused: agents can't be blocked or released until this is fixed")
+        self.notify("enforcement_identity_failed", {"identity": self.blocker_identity, "status": exc.status})
+        self._admin_alert(d, None, "ShareGuard can't block or unblock agents", {
+            "Identity": self.blocker_identity, "Error": str(exc)[:300],
+            "Next step": ("Sign the delegated account in again (absg --login-delegated) and check it still "
+                          "holds an admin role that can block agents" if delegated else
+                          "Microsoft may not accept app-only block and unblock calls: configure the delegated "
+                          "account and set block_identity to delegated")})
 
     # -- notice email -------------------------------------------------------
     def _send_notice(self, d: dict, owners: list[str] | str | None, recipients: list[dict],
@@ -1501,16 +1553,18 @@ class Guard:
                 outcome = "simulated"
                 if not self.cfg.dry_run:
                     try:
-                        self.graph.reassign(pid, manager)
+                        self.blocker.reassign(pid, manager)
                         outcome = "success"
                     except GraphError as exc:
                         self._audit("ownership_reassigned", d, previousOwners=owners, newOwner=manager,
                                     ownerStatus=statuses, outcome="failed", error=str(exc),
+                                    actingIdentity=self.blocker_identity,
                                     reason="no owner has an active account")
+                        self._alert_write_auth(d, exc)
                         break
                     self.state.package_owners[pid] = manager
                 self._audit("ownership_reassigned", d, previousOwners=owners, newOwner=manager,
-                            ownerStatus=statuses, outcome=outcome,
+                            ownerStatus=statuses, outcome=outcome, actingIdentity=self.blocker_identity,
                             reason="no owner has an active account; reassigned to a former owner's manager")
                 result.reassigned.append(pid)
                 lc.pop("ownerlessReported", None)
@@ -1738,6 +1792,8 @@ class Guard:
     def _delete_via_api(self, d: dict, entry: dict, result: CycleResult) -> None:
         pid = d["id"]
         url = self.cfg.deletion_api_path.replace("{id}", pid)
+        if not url.startswith("http"):       # undocumented: if it exists, it's beside the beta write methods
+            url = self.cfg.graph_beta_base.rstrip("/") + url
         if self.cfg.dry_run:
             self._audit("deletion_submitted", d, caseId=entry.get("caseId"), method="api", outcome="simulated")
             return
@@ -1901,19 +1957,20 @@ class Guard:
         log.info("UNBLOCK %s (%s): %s", pid, name, reason)
         if not self.cfg.dry_run:
             try:
-                self.graph.unblock(pid)
+                self.blocker.unblock(pid)
             except GraphError as exc:
                 log.error("Unblock failed for %s: %s", pid, exc)
                 self._audit("unblock", d, before=before, after=before, reason=reason,
                             caseId=case_id, onBehalfOf=on_behalf_of,
-                            outcome="failed", error=str(exc))
+                            outcome="failed", error=str(exc), actingIdentity=self.blocker_identity)
+                self._alert_write_auth(d, exc)
                 result.errors.append(pid)
                 return
             self.state.forget(pid)
         self._audit("unblock", d, before=before,
                     after=self._snapshot(self.cfg.dry_run, recipients),
                     reason=reason, caseId=case_id, onBehalfOf=on_behalf_of,
-                    originallyBlockedAt=blocked_at,
+                    originallyBlockedAt=blocked_at, actingIdentity=self.blocker_identity,
                     outcome="simulated" if self.cfg.dry_run else "success")
         result.unblocked.append(pid)
         self.notify("unblocked", {"packageId": pid, "displayName": name, "caseId": case_id,

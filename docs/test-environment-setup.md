@@ -91,7 +91,7 @@ Create the test people, two groups, the shared mailbox and two service accounts 
    - `g-absg-other`: any one member. Sharing with it is outside the approved audience.
    - Note both groups' **object ids**; requests use them in `AudienceGroupIds`.
 3. **Shared mailbox** (Exchange admin centre → Recipients → Mailboxes → Add a shared mailbox): `shareguard@<domain>`. ShareGuard sends every email from it. Also pick an address for admin alerts, for example `admin@<domain>`.
-4. **Sharing removal account**: a cloud-only user `svc-absg@<domain>`, with a long random password and MFA registered. Microsoft only allows removing sharing with a delegated (user) token, so this account does it. Give it the least-privileged admin role that can manage agents in your tenant; confirm the role in the pilot.
+4. **Delegated account**: a cloud-only user `svc-absg@<domain>`, with a long random password and MFA registered. Microsoft only allows blocking, unblocking and removing sharing with a delegated (user) token, so this account does all three. Give it the least-privileged admin role that can block and update agents in your tenant; confirm the role in the pilot by blocking a test agent with it by hand.
 5. **Flow account**: a cloud-only user `svc-absg-flow@<domain>` with a licence that includes Power Automate and Microsoft Forms. The two flows run under its connections.
 6. **Agent Builder sharing**: in the Microsoft 365 admin centre, check that users may share Agent Builder agents with specific people. ShareGuard needs real shares to detect.
 7. **Two test agents**: sign in as Olivia and build two agents in Agent Builder, for example *HR helper* (grounded on one SharePoint site) and *Personal notes* (no knowledge). Don't share them yet.
@@ -184,7 +184,7 @@ Then check and restart:
 
 ## Step 5: Set up the sharing removal account
 
-When an owner confirms, ShareGuard removes sharing as `svc-absg@`, using a refresh token you create once by signing in, stored in Key Vault.
+ShareGuard blocks, unblocks and removes sharing as `svc-absg@`, using a refresh token you create once by signing in, stored in Key Vault. Until this step is done, the guard detects shared agents but can't block them.
 
 1. **Register the delegated client** (PowerShell):
 
@@ -550,7 +550,7 @@ Most first-run problems come from a missing permission or a value left out of th
 | The review flow never gets past *Do until* | The signer is still in dry run, can't write to the Registry site, or the `PackageId` is wrong | Check `ABSG_DRY_RUN` on the signer (Step 8), Step 4, and the request's `SignerComments`. |
 | Requests turn `Needs criteria`: *edited by …, who isn't a reviewer or the approval flow* | Someone outside `signerTrustedEditors` edited the request, or the signer's own updates appear under an id other than its client id | Look at the request's version history. If the name shown is the signer's identity, add the id it shows to `signerTrustedEditors` and redeploy. |
 | `Needs criteria`: *this request is already registered* | A registered request was approved again | Submit a new request to change or renew an approval. |
-| Sharing removal fails: *Delegated sign-in missing or expired* | The refresh token expired or was revoked | Repeat Step 5, steps 2 to 6. |
+| `enforcement_identity_failed`, or sharing removal fails: *Delegated sign-in missing or expired* | The refresh token expired or was revoked, or `svc-absg@` lost its admin role | Repeat Step 5, steps 2 to 6, and check the role. Nothing is blocked or released until it works. |
 | No emails arrive | Mailbox scope not granted, or Exchange still propagating | Re-run `Grant-AbsgMailbox.ps1`; allow time for the RBAC change to take effect. |
 | An agent stays blocked after sharing is removed | An admin blocked it (ShareGuard never touches those), or a failed cycle | Check `blocked_by_guard` in `state.json` and the `error` records in the audit. |
 | `audit_integrity_failure` | An audit file was edited or a record is missing | Don't edit audit files; compare with the copy in Application Insights (`audit_to_log`). |

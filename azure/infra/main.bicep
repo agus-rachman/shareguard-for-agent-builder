@@ -623,6 +623,13 @@ var alerts = [
     window: 'PT1H'
   }
   {
+    name: 'enforcement-identity'
+    description: 'Block or unblock refused: the delegated account can\'t enforce (sign-in expired or role missing?)'
+    severity: 1
+    query: 'AppTraces | where Message startswith "audit " and Message has "\\"event\\": \\"enforcement_identity_failed\\""'
+    window: 'PT15M'
+  }
+  {
     name: 'delegated-expired'
     description: 'Sharing removal failed (delegated sign-in missing or expired?)'
     severity: 2

@@ -241,6 +241,7 @@ class ArchiveTenant(LifecycleTenant):
                 raise GraphError(self.delete_status, "not supported")
             pid = url.rsplit("/", 1)[1]
             self.deleted.append(pid)
+            self.delete_urls = [*getattr(self, "delete_urls", []), url]
             self.packages.pop(pid)
             return Resp()
         return super().request(method, url, json=json, **kw)
@@ -293,6 +294,7 @@ def test_api_deletion_mode_and_fallback(env, tmp_path):
     retire(guard, tenant)
     guard.run_cycle()                     # archive (grace 0), then delete
     assert tenant.deleted == ["a"] and records(audit, "deletion_submitted")
+    assert tenant.delete_urls == ["https://graph.microsoft.com/beta/copilot/admin/catalog/packages/a"]
     guard.run_cycle()
     assert records(audit, "agent_deleted")
 
@@ -401,9 +403,46 @@ def test_graph_user_status_and_reassign_calls():
     assert g.user_status("u1") == "disabled"
     assert g.user_status("gone") == "deleted"
     g.reassign("P1", "m1")
-    assert s.calls[-1] == ("POST", "https://graph.microsoft.com/v1.0/copilot/admin/catalog/packages/P1/reassign",
+    assert s.calls[-1] == ("POST", "https://graph.microsoft.com/beta/copilot/admin/catalog/packages/P1/reassign",
                            {"userId": "m1"})
     _ = (GraphError, Resp)
+
+
+def test_package_reads_use_v1_and_writes_use_beta():
+    """List and get are in v1.0; update, block, unblock and reassign are documented only in beta."""
+    from absg.core import GraphClient
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kw):
+            self.calls.append((method, url))
+
+            class R:
+                status_code, headers, text = 200, {}, ""
+
+                def json(self):
+                    return {"value": []}
+            return R()
+    s = Session()
+    g = GraphClient(Config(tenant_id="t", client_id="c", client_secret="x"), session=s, token_provider=lambda: "tok")
+    list(g.list_agent_builder_packages())
+    g.get_package("P1")
+    g.update_package("P1", {"availableTo": "some"})
+    g.block("P1")
+    g.unblock("P1")
+    g.reassign("P1", "u2")
+    v1, beta = "https://graph.microsoft.com/v1.0/copilot/admin/catalog/packages", \
+        "https://graph.microsoft.com/beta/copilot/admin/catalog/packages"
+    assert s.calls[0][1].startswith(v1 + "?$filter=")
+    assert s.calls[1:] == [("GET", f"{v1}/P1"), ("PATCH", f"{beta}/P1"), ("POST", f"{beta}/P1/block"),
+                           ("POST", f"{beta}/P1/unblock"), ("POST", f"{beta}/P1/reassign")]
+    # A national or test cloud can point both bases elsewhere.
+    g = GraphClient(Config(tenant_id="t", client_id="c", client_secret="x",
+                           graph_beta_base="https://graph.example.test/beta/"), session=s, token_provider=lambda: "t")
+    g.block("P2")
+    assert s.calls[-1] == ("POST", "https://graph.example.test/beta/copilot/admin/catalog/packages/P2/block")
 
 
 # ---- lifting a lifecycle block never unblocks a shared, unapproved agent -----------

@@ -225,7 +225,7 @@ These are set up by hand in Microsoft Forms and Power Automate ([Azure deploymen
 | Parameter | Meaning |
 | --- | --- |
 | `adminEmails` | Admin alerts from the guard: owner unknown, removal failed, ownerless agents, ready for deletion, archive failed |
-| `alertEmail` | Azure Monitor alerts: not running, audit integrity failure, circuit breaker, registry tampering, archive failure, delegated sign-in expired |
+| `alertEmail` | Azure Monitor alerts: not running, audit integrity failure, circuit breaker, registry tampering, archive failure, blocking refused (`enforcement_identity_failed`), delegated sign-in expired |
 | `notRunningAlertMinutes` | See [Schedules](#schedules) |
 
 To send events to Teams or a SOC instead, set `guardSettings.notify_webhook_url` (blocked, unblocked, archived, deleted, circuit breaker, audit integrity).
