@@ -210,6 +210,7 @@ Put the finished files in the folder named by `sharePointNames.templatesFolder`,
 | `archived_notice.html` | Archived | `archived_on`, `archive_reference`, `deletion_html` |
 | `ownership_transferred.html` | Reassigned to a manager | `previous_owner` |
 | `locked_notice.html` | Locked after repeated violations (no self-service link) | `violation_count`, `window_days` |
+| `locked_notice.daily.html` | Held by the daily sharing limit until the next day | `violation_count` (agents blocked today), `daily_limit`, `lock_until` |
 | `admin_alert.html` | Alerts to `adminEmails` | `subject`, `details_html` |
 
 Common placeholders: `owner_name`, `agent_name`, `agent_id`, `brand_name`, `policy_url`, `policy_link_html`, `helpdesk`. Values are HTML-escaped. Placeholders ending in `_html` are inserted as they are, because ShareGuard builds them (lists, buttons, tables). A variant file (for example `restored.reactivated.html`) is used if it exists, otherwise the base file, otherwise the default.
@@ -247,5 +248,6 @@ Any guard configuration key can go in `guardSettings`. It's applied last, so it 
 | `repeat_violation_limit` | `3` | Lock an agent on its Nth block within the window, until governance releases it; `0` = off ([details](operations-guide.md#repeat-violations)) |
 | `repeat_violation_window_days` | `30` | That window: `1` = a day, `7` = a week, `30` = a month |
 | `repeat_violation_block_types` | `["sharing", "drift"]` | Which blocks count |
+| `daily_share_limit_per_owner` | `5` | Once this many of one owner's agents are blocked for sharing in a day (UTC), the rest stay blocked until the next day or a governance release; `0` = off ([details](operations-guide.md#daily-sharing-limit-per-owner)) |
 
 The [operations guide](operations-guide.md) and [`examples/config.example.json`](../examples/config.example.json) describe every setting.

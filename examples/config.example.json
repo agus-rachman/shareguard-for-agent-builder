@@ -17,6 +17,7 @@
   "repeat_violation_limit": 3,
   "repeat_violation_window_days": 30,
   "repeat_violation_block_types": ["sharing", "drift"],
+  "daily_share_limit_per_owner": 5,
   "lock_releases_file": "/data/absg_lock_releases.json",
   "notify_webhook_url": null,
   "mail_sender": "shareguard@contoso.com",

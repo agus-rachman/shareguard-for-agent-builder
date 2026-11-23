@@ -110,6 +110,11 @@ class Config:
     # Which blocks count: "sharing" (shared without approval) and/or "drift" (an
     # approved agent that broke its approval).
     repeat_violation_block_types: list[str] = field(default_factory=lambda: ["sharing", "drift"])
+    # Daily sharing limit per owner: once this many of one owner's agents have been
+    # blocked for sharing in a day (UTC), each further one stays blocked until the next
+    # day (00:00 UTC), even if its sharing is removed, or until governance releases it.
+    # 0 = off.
+    daily_share_limit_per_owner: int = 5
     # Governance releases of locked agents: a local JSON file (storage_backend "file",
     # written by `absg --release-lock`), or a list on the operations site ("sharepoint").
     lock_releases_file: str = "absg_lock_releases.json"
@@ -313,6 +318,8 @@ class Config:
             raise ValueError("archive_after_days must be 0 or more (or null to never archive)")
         if cfg.repeat_violation_limit < 0 or cfg.repeat_violation_window_days < 1:
             raise ValueError("repeat_violation_limit must be 0 or more, repeat_violation_window_days 1 or more")
+        if cfg.daily_share_limit_per_owner < 0:
+            raise ValueError("daily_share_limit_per_owner must be 0 or more")
         if not set(cfg.repeat_violation_block_types) <= {"sharing", "drift"}:
             raise ValueError("repeat_violation_block_types may only contain sharing and drift")
         if cfg.block_identity not in ("delegated", "application"):
@@ -506,6 +513,8 @@ class StateStore:
         self.pending_audit: list[dict] = []
         # packageId -> times it was blocked for a counted violation (repeat-violation lock)
         self.violation_history: dict[str, list[str]] = {}
+        # ownerId -> {"day": "YYYY-MM-DD" (UTC), "agents": [packageId, ...]} blocked for sharing that day
+        self.daily_shares: dict[str, dict] = {}
         raw = self.backend.load()
         if raw is not None:
             self.data = raw.get("blocked_by_guard", {})
@@ -521,6 +530,7 @@ class StateStore:
             self.registry_snapshot = raw.get("registry_snapshot")
             self.pending_audit = raw.get("pending_audit", [])
             self.violation_history = raw.get("violation_history", {})
+            self.daily_shares = raw.get("daily_shares", {})
 
     def is_ours(self, package_id: str) -> bool:
         return package_id in self.data
@@ -547,7 +557,8 @@ class StateStore:
                        "lifecycle": self.lifecycle,
                        "registry_snapshot": self.registry_snapshot,
                        "pending_audit": self.pending_audit,
-                       "violation_history": self.violation_history})
+                       "violation_history": self.violation_history,
+                       "daily_shares": self.daily_shares})
 
 
 # --------------------------------------------------------------------------
@@ -1079,7 +1090,8 @@ class Guard:
             self._maybe_welcome(d, o, result)
 
         if ours and self.state.data[pid].get("locked"):
-            self._apply_lock_release(d, owners)
+            if not self._apply_lock_release(d, owners):
+                self._expire_lock(d, owners, recipients)
 
         if shared and is_exempt(d, self.cfg):
             result.skipped_exempt.append(pid)
@@ -1372,6 +1384,7 @@ class Guard:
             })
             self._save_state()      # record it now: a later crash mustn't orphan the block
         lock = self._register_violation(pid, block_type)
+        daily = self._register_daily_share(pid, block_type, owners) if not (lock and lock["locked"]) else None
         self._audit(event, d, before=before,
                     after=self._snapshot(not self.cfg.dry_run, recipients),
                     recipients=recipients, reason=reason, caseId=case_id, ownerId=owner,
@@ -1393,6 +1406,8 @@ class Guard:
                                 "caseId": case_id, "dryRun": self.cfg.dry_run})
         if lock and lock["locked"]:
             self._lock(d, case_id, owners, recipients, block_type, lock, approval_entry)
+        elif daily and daily["locked"]:
+            self._day_lock(d, case_id, owners, recipients, daily)
         else:
             self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
         return 1
@@ -1410,6 +1425,78 @@ class Guard:
         if not self.cfg.dry_run:
             self.state.violation_history[pid] = history
         return {"count": len(history), "locked": len(history) >= limit, "history": history}
+
+    def _register_daily_share(self, pid: str, block_type: str, owners: list[str]) -> dict | None:
+        """Count a sharing block against each owner's daily limit (distinct agents, UTC day)."""
+        limit = self.cfg.daily_share_limit_per_owner
+        if not limit or block_type != "sharing" or not owners:
+            return None
+        now = datetime.now(timezone.utc)
+        today = now.date().isoformat()
+        worst = None
+        for o in owners:
+            rec = self.state.daily_shares.get(o)
+            agents = list(rec["agents"]) if rec and rec.get("day") == today else []
+            if pid not in agents:
+                agents.append(pid)
+            if not self.cfg.dry_run:
+                self.state.daily_shares[o] = {"day": today, "agents": agents}
+            position = agents.index(pid) + 1
+            if worst is None or position > worst["position"]:
+                worst = {"owner": o, "position": position, "count": len(agents)}
+        until = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        return {**worst, "locked": worst["position"] > limit, "until": until.isoformat()}
+
+    def _day_lock(self, d: dict, case_id: str, owners: list[str], recipients: list[dict], daily: dict) -> None:
+        pid = d["id"]
+        limit = self.cfg.daily_share_limit_per_owner
+        reason = (f"agent number {daily['position']} of {daily['owner']} blocked for sharing today (limit {limit}): "
+                  f"stays blocked until {daily['until']} or a governance release")
+        if not self.cfg.dry_run and self.state.is_ours(pid):
+            self.state.data[pid].update({"locked": True, "lockKind": "daily",
+                                         "lockedAt": datetime.now(timezone.utc).isoformat(),
+                                         "lockUntil": daily["until"], "lockReason": reason})
+            self._save_state()
+        self._audit("daily_share_limit_locked", d, caseId=case_id, ownerId=daily["owner"],
+                    agentsToday=daily["count"], position=daily["position"], limit=limit,
+                    lockUntil=daily["until"], reason=reason,
+                    outcome="simulated" if self.cfg.dry_run else "success")
+        self.notify("daily_share_limit_locked", {"packageId": pid, "displayName": d.get("displayName"),
+                                                 "ownerId": daily["owner"], "lockUntil": daily["until"],
+                                                 "dryRun": self.cfg.dry_run})
+        until_words = datetime.fromisoformat(daily["until"]).strftime("%d %b %Y %H:%M UTC")
+        self._admin_alert(d, case_id, "Daily sharing limit exceeded: agent held until the next day", {
+            "Owner": daily["owner"], "Agents blocked for sharing today": daily["count"], "Limit": limit,
+            "Held until": until_words,
+            "Next step": "Review the owner's agents. To release this one sooner, use the lock release list "
+                         "(or absg --release-lock)."})
+        if self._mail_on:
+            for o in owners:
+                try:
+                    meta = self.mailer.send_locked_notice(self.mailer.get_user(o), d, daily["count"], 1,
+                                                          until=until_words, daily_limit=limit)
+                    self._audit("notice_email_sent", d, caseId=case_id, ownerId=o, email=meta, blockType="sharing",
+                                locked=True, ackLinkIssued=False,
+                                outcome="simulated" if meta.get("simulated") else "success")
+                except Exception as exc:
+                    self._audit("email_failed", d, template="locked_notice", caseId=case_id, ownerId=o,
+                                error=str(exc), outcome="failed")
+
+    def _expire_lock(self, d: dict, owners: list[str], recipients: list[dict]) -> None:
+        """A daily-limit lock ends at its lockUntil time; then the normal policy applies."""
+        entry = self.state.data[d["id"]]
+        until = self._parse_time(entry.get("lockUntil"))
+        if until is None or datetime.now(timezone.utc) < until:
+            return
+        for k in ("locked", "lockKind", "lockedAt", "lockUntil", "lockReason", "unblockWithheld"):
+            entry.pop(k, None)
+        self._audit("lock_expired", d, caseId=entry.get("caseId"), lockUntil=until.isoformat(),
+                    reason="daily sharing limit hold ended; the normal policy applies again")
+        if recipients:
+            # Still shared: the owner never had a self-service link for this block; send one now.
+            self._send_notice(d, owners or entry.get("ownerIds") or entry.get("ownerId"), recipients,
+                              entry.get("caseId") or uuid.uuid4().hex, entry.get("blockType") or "sharing",
+                              entry.get("violations"))
 
     def _lock(self, d: dict, case_id: str, owners: list[str], recipients: list[dict], block_type: str,
               lock: dict, approval_entry: dict | None) -> None:
@@ -1488,9 +1575,12 @@ class Guard:
                             reason="a release must name who released it, and an owner can't release their own agent")
                 self.lock_releases.mark(r, "Rejected", "an owner can't release their own agent")
                 continue
-            for k in ("locked", "lockedAt", "lockReason", "violationTimes", "unblockWithheld"):
+            kind = entry.get("lockKind") or "repeat"
+            for k in ("locked", "lockKind", "lockedAt", "lockUntil", "lockReason", "violationTimes",
+                      "unblockWithheld"):
                 entry.pop(k, None)
-            self.state.violation_history.pop(pid, None)
+            if kind == "repeat":
+                self.state.violation_history.pop(pid, None)
             self._audit("lock_released", d, caseId=entry.get("caseId"), releasedBy=by, ref=r.get("ref"),
                         reason=r.get("reason") or "released by governance", requestedAt=r.get("requestedAt"))
             self.lock_releases.mark(r, "Applied")
@@ -2328,6 +2418,7 @@ def lock_command(cfg: Config, args: Any) -> int:
     if args.list_locked:
         for pid, e in sorted(locked.items()):
             print(json.dumps({"packageId": pid, "displayName": e.get("displayName"), "lockedAt": e.get("lockedAt"),
+                              "kind": e.get("lockKind") or "repeat", "until": e.get("lockUntil"),
                               "reason": e.get("lockReason"), "owners": e.get("ownerIds")}))
         if not locked:
             print("No locked agents.")

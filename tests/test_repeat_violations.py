@@ -172,3 +172,99 @@ def test_sharepoint_release_list(tmp_path):
                  "reason": "Reviewed", "requestedAt": "2026-11-23T10:00:00Z", "ref": "5"}
     src.mark(r, "Applied")
     assert g.lists["Agent Lock Releases"]["5"]["fields"]["Status"] == "Applied"
+
+
+# ---- Daily sharing limit per owner ------------------------------------------------
+IDS = [f"a{i}" for i in range(1, 8)]
+
+
+@pytest.fixture
+def seven(env, tmp_path):
+    """One owner shares seven agents in a day: the 6th and 7th are held until tomorrow."""
+    guard, tenant, audit, signer, acks, cfg = env([agent(p) for p in IDS],
+                                                  lock_releases_file=str(tmp_path / "releases.json"))
+    guard.run_cycle()                                       # owners learned while unshared
+    for p in IDS:
+        tenant.packages[p]["sharedWithUsersAndGroups"] = SHARE
+    guard.run_cycle()
+    return guard, tenant, audit, acks, cfg
+
+
+def test_agents_beyond_the_daily_limit_are_held(seven):
+    guard, tenant, audit, acks, cfg = seven
+    held = sorted(p for p, e in guard.state.data.items() if e.get("locked"))
+    assert held == ["a6", "a7"] and all(guard.state.data[p]["lockKind"] == "daily" for p in held)
+    until = guard.state.data["a6"]["lockUntil"]
+    assert until == (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat() + "T00:00:00+00:00"
+    recs = records(audit, "daily_share_limit_locked")
+    assert [r["position"] for r in recs] == [6, 7] and recs[0]["limit"] == 5
+    held_mail = [m for m in tenant.mails_to("olivia@contoso.com") if "is blocked until" in m["subject"]]
+    assert len(held_mail) == 2 and "guard.contoso.com/ack" not in held_mail[0]["body"]["content"]
+    normal = [m for m in tenant.mails_to("olivia@contoso.com") if m["subject"].startswith("Action needed")]
+    assert len(normal) == 5                                  # the first five get the usual link
+
+
+def test_held_agents_stay_blocked_until_the_next_day(seven):
+    guard, tenant, audit, acks, cfg = seven
+    for p in IDS:
+        tenant.packages[p]["sharedWithUsersAndGroups"] = []
+    guard.run_cycle()
+    unblocked = {c[1] for c in tenant.calls if c[0] == "unblock"}
+    assert unblocked == {"a1", "a2", "a3", "a4", "a5"}
+    for p in ("a6", "a7"):                                   # next day
+        guard.state.data[p]["lockUntil"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    guard.run_cycle()
+    assert {c[1] for c in tenant.calls if c[0] == "unblock"} == set(IDS)
+    assert len(records(audit, "lock_expired")) == 2
+
+
+def test_still_shared_after_the_hold_gets_the_usual_link(seven):
+    guard, tenant, audit, acks, cfg = seven
+    guard.state.data["a6"]["lockUntil"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    before = len(tenant.mails_to("olivia@contoso.com"))
+    guard.run_cycle()
+    assert tenant.packages["a6"]["isBlocked"] and not guard.state.data["a6"].get("locked")
+    new = tenant.mails_to("olivia@contoso.com")[before:]
+    assert any("guard.contoso.com/ack" in m["body"]["content"] for m in new)
+
+
+def test_governance_can_release_a_held_agent_early(seven):
+    guard, tenant, audit, acks, cfg = seven
+    FileLockReleases(cfg.lock_releases_file).add("a6", "jane.risk@contoso.com", "Pilot team agent")
+    tenant.packages["a6"]["sharedWithUsersAndGroups"] = []
+    guard.run_cycle()
+    assert ("unblock", "a6") in tenant.calls and guard.state.data["a7"]["locked"]
+
+
+def test_daily_count_starts_again_each_day(env):
+    guard, tenant, audit, *_ = env([agent(p) for p in IDS])
+    guard.run_cycle()
+    guard.state.daily_shares[OWNER] = {"day": "2020-01-01", "agents": ["x1", "x2", "x3", "x4", "x5"]}
+    tenant.packages["a1"]["sharedWithUsersAndGroups"] = SHARE
+    guard.run_cycle()
+    assert not guard.state.data["a1"].get("locked")
+    assert guard.state.daily_shares[OWNER]["agents"] == ["a1"]
+
+
+def test_same_agent_reblocked_counts_once_a_day(env):
+    guard, tenant, audit, *_ = env([agent("a")], daily_share_limit_per_owner=1, repeat_violation_limit=0)
+    guard.run_cycle()
+    share_and_unshare(guard, tenant, 3)
+    assert guard.state.daily_shares[OWNER]["agents"] == ["a"] and not records(audit, "daily_share_limit_locked")
+
+
+def test_daily_limit_zero_turns_it_off(env):
+    guard, tenant, audit, *_ = env([agent(p) for p in IDS], daily_share_limit_per_owner=0)
+    guard.run_cycle()
+    for p in IDS:
+        tenant.packages[p]["sharedWithUsersAndGroups"] = SHARE
+    guard.run_cycle()
+    assert not records(audit, "daily_share_limit_locked")
+
+
+def test_daily_limit_is_validated(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"tenant_id": "t", "client_id": "c", "client_secret": "s",
+                             "daily_share_limit_per_owner": -1}))
+    with pytest.raises(ValueError, match="daily_share_limit_per_owner"):
+        Config.load(str(p))

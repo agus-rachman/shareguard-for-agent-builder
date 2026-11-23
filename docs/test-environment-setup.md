@@ -321,6 +321,7 @@ Turn enforcement on, then run the scenarios in order: each one starts from the s
 | 4 | Share *Personal notes* with Rita, then remove the share yourself before confirming | `block`, then `unblock` with *sharing removed*. |
 | 4a | Repeat scenario 4 twice more (3 blocks in 30 days) | The third `block` also records `repeat_violation_locked`; Olivia gets a *locked* notice with no link, admins an alert. Removing the share now gives `unblock_withheld` and the agent stays blocked. |
 | 4b | As Jane, add an item to *Agent Lock Releases* (Operations site): `Title` = the package id, `Reason` | Next cycle: `lock_released` naming Jane, the item turns `Applied`, then `unblock`. Locally: `absg --config C:\absg\config.json --release-lock <package-id> --by jane.risk@<domain> --reason "Reviewed"`. |
+| 4c | As Olivia, build six more agents and share all of them with Rita in one go | The first five are blocked as usual; the sixth and later are held: `daily_share_limit_locked`, a notice saying *blocked until* 00:00 UTC tomorrow, no link. Removing their sharing doesn't release them today. |
 
 ### Approval, drift and revocation
 
