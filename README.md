@@ -16,7 +16,7 @@ ShareGuard for Agent Builder gives organisations the missing middle ground:
 - agents that need to be shared go through *your* intake process, are assessed against *your* criteria, and are recorded in a signed central registry with named owners;
 - approved agents are watched continuously, so the agent you approved is the agent people keep using.
 
-> **Status: alpha.** ShareGuard relies on Microsoft Graph APIs, some of them in preview, and on several behaviours Microsoft doesn't document. Run it in dry-run mode and work through the [pilot checklist](docs/operations-guide.md#validate-in-a-pilot-before-enforcing) before you enforce anything. The Azure deployment (Functions, SharePoint, Key Vault) is ready for a pilot; its templates and scripts haven't yet been run against a real tenant.
+> **Status: alpha.** ShareGuard relies on Microsoft Graph APIs, some of them in preview, and on several behaviours Microsoft doesn't document. Run it in dry-run mode and work through the [pilot checklist](docs/operations-guide.md#validate-in-a-pilot-before-enforcing) before you enforce anything. The Azure deployment (Functions, SharePoint, Key Vault) is ready for a pilot; its templates and scripts haven't yet been run against a real tenant. Its [known limitations and caveats](docs/operations-guide.md#known-limitations-and-caveats) list what it can't prevent.
 
 ## Why ShareGuard is needed
 
@@ -77,6 +77,8 @@ Thousands of unreviewed personal agents means instructions nobody has read, know
 | Retire inactive agents | Rule to block ownerless agents without usage | Organisation-defined inactivity period for every Agent Builder agent: owners get a notice (for example a month ahead) and a reminder, then the agent is blocked, archived to a restricted SharePoint site and deleted from Microsoft 365. Owners can reactivate it until it's deleted. | Available |
 | Ownerless agents | Rule to reassign ownerless Agent Builder agents to a manager | Detects agents whose owners have all left; reports, reassigns to a manager or blocks, by policy; approved agents need a registered, active owner | Available |
 | Evidence for auditors | Admin centre activity | Tamper-evident, hash-chained audit trail of every detection, decision, email, acknowledgement and action, linked by case ID | Available |
+| Changes undone between checks | — | Optional: reads agent use from the Purview audit log and flags anyone using an agent not shared with them; flags agents modified and changed back between two checks | Available (pilot-check the audit record fields) |
+| Repeat offenders | — | An agent blocked repeatedly (default: 3 times in 30 days) is locked until governance releases it; an owner's agents beyond a daily sharing limit (default 5) stay blocked until the next day. Both stay blocked after sharing is removed, with no self-service link | Available |
 | Safe operation | — | Dry run, circuit breaker, fail-closed registry, never touches agents an admin blocked | Available |
 
 We looked for Microsoft and partner solutions before building ShareGuard. Partner tools and Microsoft's own registry cover inventory, reporting and manual admin actions well. In our review we didn't find one that enforces "personal by default" for Agent Builder, ties sharing to an organisation-specific approval record, and blocks on drift after approval. If you know of one, please open an issue so we can reference it.

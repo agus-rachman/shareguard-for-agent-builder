@@ -23,6 +23,7 @@ Email wording lives in a second place, a folder of [email templates](#emails). T
 | How often the guard, signer and audit check run | `guardSchedule`, `signerSchedule`, `auditCheckSchedule` | [Schedules](#schedules) |
 | Inactivity period, notice, reminder, archive, deletion | `lifecycle` | [Lifecycle](#lifecycle) |
 | Ownerless agents | `lifecycle.ownerless_action` | [Lifecycle](#lifecycle) |
+| Locking agents after repeated violations | `guardSettings.repeat_violation_*` | [Other settings](#other-settings) |
 | Sharing criteria reviewers score, longest approval | `approvalCriteria`, `maxApprovalDays` | [Approval criteria](#approval-criteria) |
 | Email branding, sender, policy link, helpdesk | `email`, `mailSender`, `policyUrl`, `helpdeskContact` | [Emails](#emails) |
 | Email wording | Template files | [Emails](#emails) |
@@ -208,6 +209,8 @@ Put the finished files in the folder named by `sharePointNames.templatesFolder`,
 | `retired_notice.html` | Retired (blocked) | `inactivity_days`, `retired_on`, `archive_on`, `ack_url`, `ack_expires`, `ack_button_html`, `after_retirement_html` |
 | `archived_notice.html` | Archived | `archived_on`, `archive_reference`, `deletion_html` |
 | `ownership_transferred.html` | Reassigned to a manager | `previous_owner` |
+| `locked_notice.html` | Locked after repeated violations (no self-service link) | `violation_count`, `window_days` |
+| `locked_notice.daily.html` | Held by the daily sharing limit until the next day | `violation_count` (agents blocked today), `daily_limit`, `lock_until` |
 | `admin_alert.html` | Alerts to `adminEmails` | `subject`, `details_html` |
 
 Common placeholders: `owner_name`, `agent_name`, `agent_id`, `brand_name`, `policy_url`, `policy_link_html`, `helpdesk`. Values are HTML-escaped. Placeholders ending in `_html` are inserted as they are, because ShareGuard builds them (lists, buttons, tables). A variant file (for example `restored.reactivated.html`) is used if it exists, otherwise the base file, otherwise the default.
@@ -225,7 +228,7 @@ These are set up by hand in Microsoft Forms and Power Automate ([Azure deploymen
 | Parameter | Meaning |
 | --- | --- |
 | `adminEmails` | Admin alerts from the guard: owner unknown, removal failed, ownerless agents, ready for deletion, archive failed |
-| `alertEmail` | Azure Monitor alerts: not running, audit integrity failure, circuit breaker, registry tampering, archive failure, blocking refused (`enforcement_identity_failed`), delegated sign-in expired |
+| `alertEmail` | Azure Monitor alerts: not running, audit integrity failure, circuit breaker, registry tampering, archive failure, agent locked after repeated violations, blocking refused (`enforcement_identity_failed`), delegated sign-in expired |
 | `notRunningAlertMinutes` | See [Schedules](#schedules) |
 
 To send events to Teams or a SOC instead, set `guardSettings.notify_webhook_url` (blocked, unblocked, archived, deleted, circuit breaker, audit integrity).
@@ -242,5 +245,11 @@ Any guard configuration key can go in `guardSettings`. It's applied last, so it 
 | `ignore_principal_ids` | `[]` | Principals that never count as sharing |
 | `ack_token_ttl_hours` | `168` | How long acknowledgement and reactivation links stay valid |
 | `drift_fail_closed` | `true` | Block an approved agent whose definition can't be read |
+| `repeat_violation_limit` | `3` | Lock an agent on its Nth block within the window, until governance releases it; `0` = off ([details](operations-guide.md#repeat-violations)) |
+| `repeat_violation_window_days` | `30` | That window: `1` = a day, `7` = a week, `30` = a month |
+| `repeat_violation_block_types` | `["sharing", "drift"]` | Which blocks count |
+| `usage_monitoring` | `false` | Read agent usage from the Purview audit log and flag use by anyone not meant to have it ([details](operations-guide.md#usage-from-the-audit-log)); needs `AuditLogsQuery.Read.All` |
+| `between_check_edits` | `report` | Flag agents changed and changed back between checks: `report`, `violation` or `off` ([details](operations-guide.md#edits-undone-between-checks)) |
+| `daily_share_limit_per_owner` | `5` | Once this many of one owner's agents are blocked for sharing in a day (UTC), the rest stay blocked until the next day or a governance release; `0` = off ([details](operations-guide.md#daily-sharing-limit-per-owner)) |
 
 The [operations guide](operations-guide.md) and [`examples/config.example.json`](../examples/config.example.json) describe every setting.

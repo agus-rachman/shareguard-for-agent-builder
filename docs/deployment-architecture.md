@@ -137,6 +137,7 @@ Segregation of duties: requesters can't approve; reviewers can't sign or write t
 | **Guard** (`id-absg-guard-prod`) | User-assigned managed identity | Graph: `CopilotPackages.ReadWrite.All`, `User.Read.All`, `GroupMember.Read.All`, `Sites.Selected` (write on the Operations and archive sites, read on the Registry site). Exchange: `Application Mail.Send` (scoped). Key Vault: read two secrets; verify only on the registry key | Write the registry; sign entries; send from other mailboxes |
 | **Registry signer** (`id-absg-signer-prod`) | User-assigned managed identity, own Function app | Key Vault: sign on the registry key. Graph: `Sites.Selected` (write on the Registry site), `CopilotPackages.Read.All`, `User.Read.All` | Block or unblock agents; send mail |
 | **Delegated account** (`svc-absg@`) | Cloud-only user | Blocks, unblocks, reassigns and removes sharing. Delegated `CopilotPackages.ReadWrite.All` through a single-tenant public client app; least-privileged admin role that can manage agents | Sign in from anywhere but the NAT IP |
+| **Governance releasers** (`-GovernanceGroup`) | Entra group | Contribute on *Agent Lock Releases* (Operations site) only | Edit state, audit or acknowledgements |
 | **Acknowledgement flow** (`svc-absg-flow@`) | Power Automate connection account | Contribute on *Agent Acknowledgements* only | Read anything else |
 | **People** | Entra groups (`ABSG - Governance Reviewers`, `ABSG - Operators`, break-glass) | Site and list permissions; PIM for any admin role | Edit the audit library (records label) |
 

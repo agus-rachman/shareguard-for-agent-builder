@@ -142,6 +142,7 @@ var sp = union({
   stateLibrary: 'ABSG State'
   auditLibrary: 'ABSG Audit'
   acknowledgementsList: 'Agent Acknowledgements'
+  lockReleasesList: 'Agent Lock Releases'
   registryList: 'Approved Agents'
   requestsList: 'Agent Sharing Requests'
   signerAuditLibrary: 'ABSG Signer Audit'
@@ -497,6 +498,7 @@ var commonConfig = {
   sharepoint_registry_list: sp.registryList
   sharepoint_requests_list: sp.requestsList
   sharepoint_acks_list: sp.acknowledgementsList
+  sharepoint_lock_releases_list: sp.lockReleasesList
   signer_audit_library: sp.signerAuditLibrary
   key_vault_url: vault.properties.vaultUri
   registry_key_name: registryKeyName
@@ -620,6 +622,20 @@ var alerts = [
     description: 'A retired agent could not be archived'
     severity: 2
     query: 'AppTraces | where Message startswith "audit " and Message has "\\"event\\": \\"archive_failed\\""'
+    window: 'PT1H'
+  }
+  {
+    name: 'repeat-violation-lock'
+    description: 'An agent was locked after repeated violations: governance review needed'
+    severity: 2
+    query: 'AppTraces | where Message startswith "audit " and Message has "\\"event\\": \\"repeat_violation_locked\\""'
+    window: 'PT15M'
+  }
+  {
+    name: 'usage-violation'
+    description: 'An agent was used by someone it is not shared with (shared between checks?)'
+    severity: 2
+    query: 'AppTraces | where Message startswith "audit " and Message has "\\"event\\": \\"usage_violation\\""'
     window: 'PT1H'
   }
   {

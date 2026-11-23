@@ -10,6 +10,7 @@
       ABSG State              library: state.json (and optional owner-map.json), versioned
       ABSG Audit              library: hash-chained audit files, one per day
       Agent Acknowledgements  list: written by the Forms + Power Automate flow
+      Agent Lock Releases     list: governance releases of locked agents (-GovernanceGroup)
 
     Registry site (governance; the guard reads, the signer writes):
       Approved Agents         list: signed registry entries (read-only to people)
@@ -43,6 +44,8 @@ param(
     [string]$ParametersFile,
     [string]$ReviewersGroup,
     [string]$FlowAccount,
+    # Who may release agents locked after repeated violations (an Entra group or user): Contribute on the list.
+    [string]$GovernanceGroup,
     # Who may submit sharing requests (an Entra group or user). Default: the site's members group.
     [string]$RequestersGroup
 )
@@ -107,6 +110,16 @@ Add-AbsgList -Title $n.acknowledgementsList -Description 'ShareGuard for Agent B
     @{ Name = 'CaseId'; Type = 'Text' }, @{ Name = 'PackageId'; Type = 'Text' }, @{ Name = 'OwnerId'; Type = 'Text' },
     @{ Name = 'TokenId'; Type = 'Text' }, @{ Name = 'Attempts'; Type = 'Number' }, @{ Name = 'StatusReason'; Type = 'Note' }) `
     -Indexed @('Status', 'CaseId', 'PackageId')
+Add-AbsgList -Title $n.lockReleasesList -Description 'ShareGuard for Agent Builder: governance releases of agents locked after repeated violations. Title = package id. Governance only.' -Fields @(
+    @{ Name = 'Reason'; Type = 'Note' },
+    @{ Name = 'Status'; Type = 'Choice'; Default = 'New'; Choices = @('New', 'Applied', 'Rejected') },
+    @{ Name = 'StatusReason'; Type = 'Note' }) -Indexed @('Status')
+if ($PSCmdlet.ShouldProcess($n.lockReleasesList, 'Governance only: unique permissions')) {
+    Set-PnPList -Identity $n.lockReleasesList -BreakRoleInheritance -CopyRoleAssignments | Out-Null
+    if ($GovernanceGroup) {
+        Set-PnPListPermission -Identity $n.lockReleasesList -User $GovernanceGroup -AddRole 'Contribute' | Out-Null
+    }
+}
 if ($FlowAccount -and $PSCmdlet.ShouldProcess($n.acknowledgementsList, "Contribute for $FlowAccount")) {
     Set-PnPList -Identity $n.acknowledgementsList -BreakRoleInheritance -CopyRoleAssignments | Out-Null
     Set-PnPListPermission -Identity $n.acknowledgementsList -User $FlowAccount -AddRole 'Contribute' | Out-Null

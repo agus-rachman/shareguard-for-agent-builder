@@ -33,6 +33,8 @@ param(
     [string]$SignerPrincipalId,
     # Add ReadWrite for the signer only if your tenant rejects app-only reads otherwise.
     [string[]]$GuardRoles = @('CopilotPackages.ReadWrite.All', 'User.Read.All', 'GroupMember.Read.All', 'Sites.Selected'),
+    # Also grant AuditLogsQuery.Read.All, for usage_monitoring (agent use from the Purview audit log).
+    [switch]$UsageMonitoring,
     [string[]]$SignerRoles = @('CopilotPackages.Read.All', 'User.Read.All', 'Sites.Selected')
 )
 Set-StrictMode -Version Latest
@@ -64,6 +66,7 @@ function Grant-Roles([string]$PrincipalId, [string[]]$Roles) {
 }
 
 Write-Host "Guard ($GuardPrincipalId)"
+if ($UsageMonitoring) { $GuardRoles += 'AuditLogsQuery.Read.All' }
 Grant-Roles $GuardPrincipalId $GuardRoles
 Write-Host "Signer ($SignerPrincipalId)"
 Grant-Roles $SignerPrincipalId $SignerRoles

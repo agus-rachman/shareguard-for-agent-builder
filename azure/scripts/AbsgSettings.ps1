@@ -42,6 +42,7 @@ function Get-AbsgSettings {
         stateLibrary         = 'ABSG State'
         auditLibrary         = 'ABSG Audit'
         acknowledgementsList = 'Agent Acknowledgements'
+        lockReleasesList     = 'Agent Lock Releases'
         registryList         = 'Approved Agents'
         requestsList         = 'Agent Sharing Requests'
         signerAuditLibrary   = 'ABSG Signer Audit'
