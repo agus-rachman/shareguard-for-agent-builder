@@ -16,7 +16,7 @@ ShareGuard for Agent Builder gives organisations the missing middle ground:
 - agents that need to be shared go through *your* intake process, are assessed against *your* criteria, and are recorded in a signed central registry with named owners;
 - approved agents are watched continuously, so the agent you approved is the agent people keep using.
 
-> **Status: alpha.** ShareGuard relies on Microsoft Graph APIs, some of them in preview, and on several behaviours Microsoft doesn't document. Run it in dry-run mode and work through the [pilot checklist](docs/operations-guide.md#validate-in-a-pilot-before-enforcing) before you enforce anything. The Azure deployment (Functions, SharePoint, Key Vault) is ready for a pilot; its templates and scripts haven't yet been run against a real tenant.
+> **Status: alpha.** ShareGuard relies on Microsoft Graph APIs, some of them in preview, and on several behaviours Microsoft doesn't document. Run it in dry-run mode and work through the [pilot checklist](docs/operations-guide.md#validate-in-a-pilot-before-enforcing) before you enforce anything. The Azure deployment (Functions, SharePoint, Key Vault) is ready for a pilot; its templates and scripts haven't yet been run against a real tenant. Its [known limitations and caveats](docs/operations-guide.md#known-limitations-and-caveats) list what it can't prevent.
 
 ## Why ShareGuard is needed
 

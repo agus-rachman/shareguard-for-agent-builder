@@ -147,6 +147,8 @@ Run with `dryRun: true` for at least two weeks. Everything is audited as `simula
 3. The [pilot checklist](operations-guide.md#validate-in-a-pilot-before-enforcing) in the operations guide: owner fields, sharing fields, `PATCH` behaviour, `lastUsedDateTime`, propagation delay.
 4. `absg --verify-audit-store` (or the nightly `verify_audit_chain` function) reports an intact chain.
 
+Before enforcing, read the [known limitations and caveats](operations-guide.md#known-limitations-and-caveats) with your governance and security teams.
+
 Then set `dryRun: false` for one pilot group (use `exempt_ids` for agents outside the pilot), and finally for everyone. Turn on lifecycle features one at a time: `owner_status_checks` first, then `ownerless_action`, then `inactivity_days`. Before archive and deletion begin, check the first archived agent in the archive library, and do one deletion by hand in the admin centre to confirm ShareGuard records it (`agent_deleted`).
 
 ## Configuration

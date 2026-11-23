@@ -348,9 +348,50 @@ These behaviours aren't fully documented. Check each one in a test tenant or wit
 9. **Reassignment.** If you use `reassign_to_manager`, try `POST …/reassign` on a test agent with the delegated account first: like block and unblock, it runs as that account.
 10. **API versions and app-only writes.** Reads (list, get) use v1.0; block, unblock, update and reassign use `/beta`, the only version Microsoft documents them in. Microsoft's pages for these write methods list delegated permissions only, so expect 401 or 403 from the guard's app-only block and unblock calls. Check this first. If they're refused, enforcement can't work app-only until Microsoft adds application support. If your tenant only exposes the reads under `/beta` too, set `graph_base` to the beta URL. Beta isn't supported for production.
 
-## Known limitation
+## Known limitations and caveats
 
-This is a detective control. A shared agent stays usable for up to one polling interval plus propagation delay. Keep the interval short, and pair the daemon with data-layer controls (Restricted Content Discovery, sensitivity labels, DLP) to limit what a briefly shared agent could expose.
+ShareGuard is a **detective** control built on preview APIs: it finds sharing and drift after the fact and reverses them, it doesn't prevent them. Read these before relying on it, and pair it with data-layer controls (sensitivity labels, Restricted Content Discovery, DLP) that limit what a briefly exposed agent can reach.
+
+### Exposure ShareGuard can't prevent
+
+| Caveat | Why | What reduces it |
+|---|---|---|
+| **Every share is usable for a while before it's blocked** | ShareGuard checks on a schedule; Microsoft offers no event when sharing changes. Each share stays usable for up to one polling interval plus Microsoft's propagation delay (measure it in the pilot). | A short `poll_interval_seconds` (guard schedule). The [repeat-violation lock](#repeat-violations) and the [daily limit](#daily-sharing-limit-per-owner) stop the window being reused, but the first exposures still happen. |
+| **Approved audiences can grow through group membership** | An approval names the groups an agent may be shared with, and ShareGuard checks the groups it's shared with, not who's in them. Whoever manages an approved group can add anyone to it, and the agent's audience grows with no change ShareGuard can see. ShareGuard doesn't control group membership. | Approve only groups that governance or IT owns, with membership changes reviewed (Entra access reviews, dynamic groups); keep audiences small; record each group's owners in the approval. |
+| **Changes between two checks are invisible** | An owner can add embedded files or a knowledge source, use it and undo it within one polling interval. | A short polling interval; Purview audit for agent edits; data-layer controls. |
+| **The circuit breaker can hide shares** | When `max_blocks_per_cycle` (25) blocks have been issued in one cycle, the rest are deferred (`block_deferred`) to the next cycle, so a burst of shares can delay the block of one that matters. | The `circuit_breaker` alert; investigate every one. Lowering the limit would defer more agents, not fewer. |
+
+### Limits of the repeat-violation and daily controls
+
+| Caveat | Detail |
+|---|---|
+| **Counting depends on knowing the owner** | The daily limit counts per owner. If an agent's owner can't be resolved (no owner field, not learned while unshared, no owner map), it isn't counted. The repeat-violation count is per agent and doesn't need an owner. |
+| **Copies under the daily limit** | Copying an agent starts its repeat-violation count again. The daily limit (default 5 per owner per day) caps how far this goes, but a maker can still share up to the limit each day. |
+| **"A day" is the UTC day** | Daily holds end at 00:00 UTC, whatever the tenant's time zone. |
+| **An admin unblock releases a lock** | Unblocking a locked agent in the Microsoft 365 admin centre counts as a release (audited as `lock_released`). Its violation count is kept, so its next violation locks it again at once. Restrict who can unblock agents. |
+| **Owners can't release their own agents, but other governance members can** | A release is refused only when it comes from one of the agent's owners. Who may write *Agent Lock Releases* (or run `--release-lock` locally) is decided by the list's permissions and file access. |
+
+### Microsoft platform dependencies
+
+| Caveat | Detail |
+|---|---|
+| **The write APIs are preview, under `/beta`** | Block, unblock, update and reassign exist only under `/beta` and can change or break without notice. Reads (list, get) use v1.0. See [How it works](#how-it-works). |
+| **Enforcement runs as a delegated service account** | Microsoft documents the write methods with delegated permissions only, so blocking, unblocking, reassigning and removing sharing run as `svc-absg@`. That account holds an admin role, and if its sign-in expires or its role is removed, nothing is blocked or released until it's fixed (`enforcement_identity_failed`, alerted every cycle). Protect it with Conditional Access and sign-in monitoring. |
+| **Undocumented behaviour** | Several things ShareGuard relies on aren't documented: whether `PATCH` clears Agent Builder sharing, how uploaded files appear in the definition, whether `sharedWithUsersAndGroups` excludes the owner, whether `lastUsedDateTime` is populated, and how a deleted agent disappears from the list. Work through the [pilot checklist](#validate-in-a-pilot-before-enforcing). |
+| **Licensing** | The API needs Microsoft Agent 365 licensing, and Microsoft's statements on which licences are required have changed during the preview. |
+| **Inactivity without usage data** | If `lastUsedDateTime` isn't populated, inactivity is measured from the last edit, so an agent used every day but never edited can be retired. Check before turning on `inactivity_days`. |
+
+### Configuration and trust assumptions
+
+| Caveat | Detail |
+|---|---|
+| **Exemptions match by manifest ID too** | An `exempt_ids` entry matches a package id or a manifest id. If copies of an agent keep the original's manifest id, the exemption covers them. Prefer package ids, and check in the pilot. |
+| **Ignored principals are never sharing** | Anyone in `ignore_principal_ids` can be shared with freely. Keep it to fixed service accounts. |
+| **The guard's state is trusted** | Rollback protection for the registry, the repeat-violation counts, the daily counts and the record of which blocks are the guard's own all live in the guard's state. Anyone who can write the state (the Operations site's *ABSG State* library, or `state_file`) can undo them. Registry editors must not have write access there. |
+| **The audit chain shows tampering only to people who can't write it** | The hash chain detects edited or missing records, but an identity with write access to the audit library (including the guard's own) could rewrite the whole chain. Rely on the retention (record) label on closed days, the copy in Application Insights, and an exported copy in immutable storage. |
+| **No registry at all on a first start** | If the registry can't be read and no earlier copy was ever saved, decisions on shared agents are deferred (`decision_deferred`) rather than blocking every approved agent. Someone able to break that read before the first successful load delays enforcement. |
+| **Signer review checks have limits** | Only KS-02 (no embedded files) is checked against the live agent automatically; other criteria rely on reviewers reading `ReviewConfigSummary`. The edit-history check needs `signer_trusted_editors`, and is off without it. |
+| **Local mode can't verify who confirms** | The built-in confirmation page on `localhost`, with `ack_require_identity: false`, accepts a forwarded link from anyone. Use it on a single test PC only, or put an authenticating proxy in front of it. |
 
 ## Tests
 
