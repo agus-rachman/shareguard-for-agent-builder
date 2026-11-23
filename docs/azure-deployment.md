@@ -73,7 +73,7 @@ $o = Get-Content build/outputs.json | ConvertFrom-Json
 
 | Identity | Microsoft Graph | SharePoint (Sites.Selected) | Other |
 | --- | --- | --- | --- |
-| Guard | `CopilotPackages.ReadWrite.All`, `User.Read.All`, `GroupMember.Read.All`, `Sites.Selected` | Operations: write · Registry: read · Archive: write | `Application Mail.Send` on the shared mailbox only; Key Vault: two secrets, public key |
+| Guard | `CopilotPackages.ReadWrite.All`, `User.Read.All`, `GroupMember.Read.All`, `Sites.Selected`; with `-UsageMonitoring`, also `AuditLogsQuery.Read.All` (for `usage_monitoring`) | Operations: write · Registry: read · Archive: write | `Application Mail.Send` on the shared mailbox only; Key Vault: two secrets, public key |
 | Signer | `CopilotPackages.Read.All`, `User.Read.All`, `Sites.Selected` | Registry: write | Key Vault: sign with the registry key |
 
 Restart both apps afterwards so they pick up tokens with the new roles.

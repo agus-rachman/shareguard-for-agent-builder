@@ -632,6 +632,13 @@ var alerts = [
     window: 'PT15M'
   }
   {
+    name: 'usage-violation'
+    description: 'An agent was used by someone it is not shared with (shared between checks?)'
+    severity: 2
+    query: 'AppTraces | where Message startswith "audit " and Message has "\\"event\\": \\"usage_violation\\""'
+    window: 'PT1H'
+  }
+  {
     name: 'enforcement-identity'
     description: 'Block or unblock refused: the delegated account can\'t enforce (sign-in expired or role missing?)'
     severity: 1

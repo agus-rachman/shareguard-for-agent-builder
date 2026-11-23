@@ -77,6 +77,7 @@ Thousands of unreviewed personal agents means instructions nobody has read, know
 | Retire inactive agents | Rule to block ownerless agents without usage | Organisation-defined inactivity period for every Agent Builder agent: owners get a notice (for example a month ahead) and a reminder, then the agent is blocked, archived to a restricted SharePoint site and deleted from Microsoft 365. Owners can reactivate it until it's deleted. | Available |
 | Ownerless agents | Rule to reassign ownerless Agent Builder agents to a manager | Detects agents whose owners have all left; reports, reassigns to a manager or blocks, by policy; approved agents need a registered, active owner | Available |
 | Evidence for auditors | Admin centre activity | Tamper-evident, hash-chained audit trail of every detection, decision, email, acknowledgement and action, linked by case ID | Available |
+| Changes undone between checks | — | Optional: reads agent use from the Purview audit log and flags anyone using an agent not shared with them; flags agents modified and changed back between two checks | Available (pilot-check the audit record fields) |
 | Repeat offenders | — | An agent blocked repeatedly (default: 3 times in 30 days) is locked until governance releases it; an owner's agents beyond a daily sharing limit (default 5) stay blocked until the next day. Both stay blocked after sharing is removed, with no self-service link | Available |
 | Safe operation | — | Dry run, circuit breaker, fail-closed registry, never touches agents an admin blocked | Available |
 

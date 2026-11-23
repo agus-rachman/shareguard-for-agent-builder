@@ -115,6 +115,21 @@ class Config:
     # day (00:00 UTC), even if its sharing is removed, or until governance releases it.
     # 0 = off.
     daily_share_limit_per_owner: int = 5
+    # Changes made and undone between two checks.
+    # 1. Usage from the Purview audit log (CopilotInteraction records): an unapproved agent
+    #    used by anyone but an owner, or an approved one used outside its audience, was
+    #    shared at that moment. Needs AuditLogsQuery.Read.All on the guard's identity.
+    usage_monitoring: bool = False
+    usage_record_types: list[str] = field(default_factory=lambda: ["copilotInteraction"])
+    usage_agent_id_keys: list[str] = field(default_factory=lambda: ["AgentId"])   # where auditData names the agent
+    usage_lookback_hours: int = 24          # how far back the first query reaches
+    usage_overlap_minutes: int = 120        # each window re-reads this much, for late records
+    usage_query_timeout_minutes: int = 60   # give up on a query that hasn't finished
+    usage_counts_as_violation: bool = True  # counts towards repeat-violation locks
+    # 2. lastModifiedDateTime moved but the agent reads exactly as before: something was
+    #    changed and undone between checks. "report" (audit + admin alert for approved
+    #    agents), "violation" (also counts towards repeat-violation locks) or "off".
+    between_check_edits: str = "report"
     # Governance releases of locked agents: a local JSON file (storage_backend "file",
     # written by `absg --release-lock`), or a list on the operations site ("sharepoint").
     lock_releases_file: str = "absg_lock_releases.json"
@@ -318,6 +333,8 @@ class Config:
             raise ValueError("archive_after_days must be 0 or more (or null to never archive)")
         if cfg.repeat_violation_limit < 0 or cfg.repeat_violation_window_days < 1:
             raise ValueError("repeat_violation_limit must be 0 or more, repeat_violation_window_days 1 or more")
+        if cfg.between_check_edits not in ("report", "violation", "off"):
+            raise ValueError("between_check_edits must be report, violation or off")
         if cfg.daily_share_limit_per_owner < 0:
             raise ValueError("daily_share_limit_per_owner must be 0 or more")
         if not set(cfg.repeat_violation_block_types) <= {"sharing", "drift"}:
@@ -449,6 +466,13 @@ class GraphClient:
             return "deleted" if exc.status == 404 else "unknown"
         return "disabled" if user.get("accountEnabled") is False else "active"
 
+    def member_of(self, user_id: str, group_ids: list[str]) -> set[str]:
+        """Which of these groups the user is in (transitively)."""
+        if not group_ids:
+            return set()
+        body = {"groupIds": list(group_ids)}
+        return set(self.request("POST", f"/users/{user_id}/checkMemberGroups", json=body).json().get("value", []))
+
     def manager_of(self, user_id: str) -> str | None:
         try:
             return self.request("GET", f"/users/{user_id}/manager?$select=id").json().get("id")
@@ -515,6 +539,10 @@ class StateStore:
         self.violation_history: dict[str, list[str]] = {}
         # ownerId -> {"day": "YYYY-MM-DD" (UTC), "agents": [packageId, ...]} blocked for sharing that day
         self.daily_shares: dict[str, dict] = {}
+        # audit log usage query progress (absg.usage.UsageMonitor)
+        self.usage: dict = {}
+        # packageId -> {"modified", "definitionHash", "shared"} as last seen (between-check edits)
+        self.edit_watch: dict[str, dict] = {}
         raw = self.backend.load()
         if raw is not None:
             self.data = raw.get("blocked_by_guard", {})
@@ -531,6 +559,8 @@ class StateStore:
             self.pending_audit = raw.get("pending_audit", [])
             self.violation_history = raw.get("violation_history", {})
             self.daily_shares = raw.get("daily_shares", {})
+            self.usage = raw.get("usage", {})
+            self.edit_watch = raw.get("edit_watch", {})
 
     def is_ours(self, package_id: str) -> bool:
         return package_id in self.data
@@ -558,7 +588,9 @@ class StateStore:
                        "registry_snapshot": self.registry_snapshot,
                        "pending_audit": self.pending_audit,
                        "violation_history": self.violation_history,
-                       "daily_shares": self.daily_shares})
+                       "daily_shares": self.daily_shares,
+                       "usage": self.usage,
+                       "edit_watch": self.edit_watch})
 
 
 # --------------------------------------------------------------------------
@@ -832,7 +864,8 @@ class Guard:
                  delegated_graph: GraphClient | None = None,
                  registry: Any = None,
                  archive: Any = None,
-                 lock_releases: Any = None):
+                 lock_releases: Any = None,
+                 usage_monitor: Any = None):
         self.cfg = cfg
         self.graph = graph
         self.state = state
@@ -862,6 +895,11 @@ class Guard:
         if lock_releases is None and cfg.storage_backend == "file":
             lock_releases = FileLockReleases(cfg.lock_releases_file)
         self.lock_releases = lock_releases
+        if usage_monitor is None and cfg.usage_monitoring:
+            from .usage import UsageMonitor
+            usage_monitor = UsageMonitor(graph, cfg, state)
+        self.usage = usage_monitor
+        self._cycle_seen: dict[str, tuple[dict, list[str]]] = {}
         self._releases: dict[str, list[dict]] = {}
         self._registry_file_hash: str | None = None
         self._cycle_id: str | None = None
@@ -906,6 +944,7 @@ class Guard:
         self._status_cache = {}
         self._cycle_id = uuid.uuid4().hex
         self._write_auth_alerted = False
+        self._cycle_seen = {}
         try:
             return self._run_cycle(result, seen, new_blocks)
         finally:
@@ -966,6 +1005,8 @@ class Guard:
             self._audit("cycle_end", summary=self._summary(result), completed=False)
             raise
 
+        self._check_usage(result, new_blocks)
+
         # Packages we blocked that no longer exist (deleted by owner/admin).
         for pid in self.state.ids() - seen:
             log.info("Package %s no longer in catalog; forgetting", pid)
@@ -982,6 +1023,8 @@ class Guard:
             self.state.validations.pop(pid, None)
         for pid in set(self.state.lifecycle) - seen:
             self.state.lifecycle.pop(pid, None)
+        for pid in set(self.state.edit_watch) - seen:
+            self.state.edit_watch.pop(pid, None)
         if self.acks:
             for ack in self.acks.pending():
                 if ack["packageId"] not in seen:
@@ -1088,6 +1131,11 @@ class Guard:
         owners, owner_source = self._owners(d, shared)
         for o in owners:
             self._maybe_welcome(d, o, result)
+        self._cycle_seen[pid] = (d, owners)
+        edit_violation = self._watch_edits(d, shared, owners)
+        if edit_violation and edit_violation["locked"]:
+            return self._hold_on_evidence(d, owners, recipients, before, blocked, ours, result, new_blocks,
+                                          edit_violation, "configuration changed and undone between two checks")
 
         if ours and self.state.data[pid].get("locked"):
             if not self._apply_lock_release(d, owners):
@@ -1332,7 +1380,8 @@ class Guard:
                reason: str, violations: list[dict] | None = None,
                approval_entry: dict | None = None, evaluation: Any = None,
                approval_status: str | None = None, owners: list[str] | None = None,
-               extra: dict | None = None, state_extra: dict | None = None) -> int:
+               extra: dict | None = None, state_extra: dict | None = None,
+               violation: dict | None = None) -> int:
         pid, name = d["id"], d.get("displayName", "")
         owners = owners if owners is not None else ([owner] if owner else [])
         ours = self.state.is_ours(pid)
@@ -1383,7 +1432,7 @@ class Guard:
                 **(state_extra or {}),
             })
             self._save_state()      # record it now: a later crash mustn't orphan the block
-        lock = self._register_violation(pid, block_type)
+        lock = violation if violation is not None else self._register_violation(pid, block_type)
         daily = self._register_daily_share(pid, block_type, owners) if not (lock and lock["locked"]) else None
         self._audit(event, d, before=before,
                     after=self._snapshot(not self.cfg.dry_run, recipients),
@@ -1411,6 +1460,151 @@ class Guard:
         else:
             self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
         return 1
+
+    # -- changes made and undone between checks --------------------------------
+    @staticmethod
+    def _definition_hash(d: dict) -> str:
+        from .registry import declarative_definitions
+        return hashlib.sha256(_canonical([d.get("displayName"), d.get("description"),
+                                          declarative_definitions(d)])).hexdigest()
+
+    def _watch_edits(self, d: dict, shared: bool, owners: list[str]) -> dict | None:
+        """lastModifiedDateTime moved, but the agent reads exactly as it did last cycle, with
+        the same sharing and blocked state: something was changed and undone in between.
+        (A block, unblock or sharing removal by the guard changes one of those, so it isn't
+        mistaken for one.)"""
+        if self.cfg.between_check_edits == "off":
+            return None
+        pid, modified = d["id"], d.get("lastModifiedDateTime")
+        if not modified:
+            return None
+        h = self._definition_hash(d)
+        prev = self.state.edit_watch.get(pid)
+        blocked = bool(d.get("isBlocked"))
+        self.state.edit_watch[pid] = {"modified": modified, "definitionHash": h, "shared": shared,
+                                      "blocked": blocked}
+        if not prev or prev.get("modified") == modified or prev.get("definitionHash") != h \
+                or prev.get("shared") != shared or prev.get("blocked", blocked) != blocked:
+            return None                         # unchanged, first sight, or a change the normal checks see
+        approval = self.registry.lookup(d) if self.registry else None
+        approved = approval is not None and approval.valid
+        reason = ("modified between two checks, but it reads exactly as before: a change was made and "
+                  "undone (for example sharing, knowledge or files added and removed), or saved unchanged")
+        violation = None
+        if self.cfg.between_check_edits == "violation":
+            violation = self._register_violation(pid, "drift" if approved else "sharing")
+        self._audit("edit_between_checks", d, previousModified=prev.get("modified"), modified=modified,
+                    approved=approved, ownerIds=owners, reason=reason,
+                    violationCount=violation["count"] if violation else None)
+        if approved or violation:
+            self._admin_alert(d, None, "Agent changed and changed back between two checks", {
+                "Owners": ", ".join(owners) or "unknown", "Approved": "yes" if approved else "no",
+                "Last modified": f"{prev.get('modified')} -> {modified}",
+                "Next step": "Check the agent's audit history (Purview) for what was changed"},
+                extra=(approval.entry.get("governanceContacts") or []) if approved else None)
+        return violation
+
+    def _check_usage(self, result: CycleResult, new_blocks: int) -> None:
+        """Usage from the audit log: an unapproved agent used by someone other than an owner,
+        or an approved one used outside its audience, was shared at that moment."""
+        if self.usage is None:
+            return
+        try:
+            events = self.usage.poll()
+        except Exception as exc:
+            self._audit("error", stage="usage", error=str(exc)[:500],
+                        reason="agent usage could not be read from the audit log")
+            return
+        if not events:
+            return
+        index: dict[str, str] = {}
+        for pid, (d, _owners) in self._cycle_seen.items():
+            for key in (pid, d.get("manifestId")):
+                if key:
+                    index[str(key).lower()] = pid
+        unmatched, findings = 0, {}
+        for ev in events:
+            pid = next((index[k] for a in ev["agentIds"] for k in index if k in a.lower()), None)
+            if pid is None:
+                unmatched += 1
+                continue
+            d, owners = self._cycle_seen[pid]
+            why = self._usage_problem(d, owners, ev)
+            if why:
+                key = (pid, ev.get("userId") or ev.get("userPrincipalName"))
+                f = findings.setdefault(key, {"pid": pid, "event": ev, "why": why, "count": 0, "first": ev["time"]})
+                f["count"] += 1
+                f["first"] = min(f["first"] or "", ev["time"] or "") or f["first"]
+        self._audit("usage_checked", events=len(events), unmatched=unmatched, findings=len(findings),
+                    window=self.state.usage.get("until"))
+        for f in findings.values():
+            d, owners = self._cycle_seen[f["pid"]]
+            ev = f["event"]
+            violation = None
+            if self.cfg.usage_counts_as_violation and not self._recent_violation(f["pid"], f["first"]):
+                violation = self._register_violation(f["pid"], "sharing")
+            self._audit("usage_violation", d, userId=ev.get("userId"), userPrincipalName=ev.get("userPrincipalName"),
+                        interactions=f["count"], firstSeen=f["first"], recordId=ev.get("recordId"),
+                        ownerIds=owners, reason=f["why"],
+                        violationCount=violation["count"] if violation else None)
+            self.notify("usage_violation", {"packageId": f["pid"], "user": ev.get("userPrincipalName"),
+                                            "reason": f["why"]})
+            self._admin_alert(d, None, "Agent used by someone it isn't shared with", {
+                "Owners": ", ".join(owners) or "unknown", "Used by": ev.get("userPrincipalName") or ev.get("userId"),
+                "Interactions": f["count"], "First seen": f["first"], "Why": f["why"],
+                "Next step": "The agent was shared at that time, even if it isn't now. Review it with the owner."})
+            if violation and violation["locked"]:
+                recipients = sharing_recipients(d, self.cfg)
+                blocked, ours = bool(d.get("isBlocked")), self.state.is_ours(f["pid"])
+                self._hold_on_evidence(d, owners, recipients, self._snapshot(blocked, recipients), blocked, ours,
+                                       result, new_blocks, violation,
+                                       f"used by {ev.get('userPrincipalName') or ev.get('userId')} "
+                                       "while shared between checks")
+
+    def _usage_problem(self, d: dict, owners: list[str], ev: dict) -> str | None:
+        user = {str(x).lower() for x in (ev.get("userId"), ev.get("userPrincipalName")) if x}
+        if not owners:
+            return None                        # can't tell owner use from anyone else's
+        if user & {o.lower() for o in owners} or is_exempt(d, self.cfg):
+            return None
+        approval = self.registry.lookup(d) if self.registry else None
+        if approval is None or not approval.valid:
+            return "used by someone other than its owners, so it was shared, but it isn't approved for sharing"
+        allowed = (approval.entry.get("sharing") or {}).get("allowedPrincipals") or []
+        if user & {str(p.get("resourceId", "")).lower() for p in allowed
+                   if str(p.get("resourceType", "")).lower() == "user"}:
+            return None
+        groups = [p.get("resourceId") for p in allowed if str(p.get("resourceType", "")).lower() == "group"]
+        if groups and ev.get("userId"):
+            try:
+                if self.graph.member_of(ev["userId"], groups):
+                    return None
+            except Exception as exc:
+                log.warning("Group membership check failed for %s: %s", ev.get("userId"), exc)
+                return None                    # unsure: don't accuse
+        if any(str(p.get("resourceType", "")).lower() == "tenant" for p in allowed):
+            return None
+        return "used by someone outside its approved audience"
+
+    def _recent_violation(self, pid: str, when: str | None) -> bool:
+        """A violation was already counted for this agent within a day of this use."""
+        t = self._parse_time(when) or datetime.now(timezone.utc)
+        return any(abs((self._parse_time(v) or t) - t) <= timedelta(days=1)
+                   for v in self.state.violation_history.get(pid, []))
+
+    def _hold_on_evidence(self, d: dict, owners: list[str], recipients: list[dict], before: dict, blocked: bool,
+                          ours: bool, result: CycleResult, new_blocks: int, violation: dict, reason: str) -> int:
+        """The violation limit was reached on evidence (usage, or a change undone) rather
+        than a block: block and lock the agent, or lock the block it already has."""
+        pid = d["id"]
+        if blocked and not ours:
+            return 0                            # an admin's block: leave it
+        if blocked and ours:
+            self._lock(d, self.state.data[pid].get("caseId"), owners, recipients,
+                       self.state.data[pid].get("blockType") or "sharing", violation, None)
+            return 0
+        return self._block(d, result, recipients, owners[0] if owners else None, "evidence", before, new_blocks,
+                           block_type="sharing", reason=reason, owners=owners, violation=violation)
 
     # -- repeat violations ----------------------------------------------------
     def _register_violation(self, pid: str, block_type: str) -> dict | None:

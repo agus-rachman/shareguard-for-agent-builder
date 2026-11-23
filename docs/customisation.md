@@ -248,6 +248,8 @@ Any guard configuration key can go in `guardSettings`. It's applied last, so it 
 | `repeat_violation_limit` | `3` | Lock an agent on its Nth block within the window, until governance releases it; `0` = off ([details](operations-guide.md#repeat-violations)) |
 | `repeat_violation_window_days` | `30` | That window: `1` = a day, `7` = a week, `30` = a month |
 | `repeat_violation_block_types` | `["sharing", "drift"]` | Which blocks count |
+| `usage_monitoring` | `false` | Read agent usage from the Purview audit log and flag use by anyone not meant to have it ([details](operations-guide.md#usage-from-the-audit-log)); needs `AuditLogsQuery.Read.All` |
+| `between_check_edits` | `report` | Flag agents changed and changed back between checks: `report`, `violation` or `off` ([details](operations-guide.md#edits-undone-between-checks)) |
 | `daily_share_limit_per_owner` | `5` | Once this many of one owner's agents are blocked for sharing in a day (UTC), the rest stay blocked until the next day or a governance release; `0` = off ([details](operations-guide.md#daily-sharing-limit-per-owner)) |
 
 The [operations guide](operations-guide.md) and [`examples/config.example.json`](../examples/config.example.json) describe every setting.

@@ -183,6 +183,40 @@ A maker who shares many agents at once, or makes copies of an agent to start eac
 
 An agent counts once a day, however often it's reblocked, and the count starts again each UTC day. For an agent with several owners, the owner with the most blocked agents that day decides. A held agent works like a locked one: unblocks are withheld, owner confirmations are rejected, the owners get a notice saying when it's released (with no self-service link), and admins get an alert (`daily_share_limit_locked`). When the hold ends (`lock_expired`), the normal policy applies: it's unblocked if its sharing is gone, and if it's still shared the owners get the usual notice with a link. Governance can release a held agent early in the same way as a locked one. A repeat-violation lock takes precedence: an agent that reaches both stays locked until governance releases it.
 
+## Changes made and undone between checks
+
+A change made and undone between two checks, such as sharing an agent for a few minutes or adding a file and removing it, leaves the agent's configuration as it was, so the normal checks can't see it. Two signals catch it afterwards. Neither prevents it.
+
+### Usage from the audit log
+
+Every use of an agent in Copilot is audited in Microsoft Purview as a `CopilotInteraction` record, with the user and the agent. If anyone other than an owner used an unapproved agent, it was shared at that moment; if anyone outside the approved audience used an approved one, it was shared beyond it. With `usage_monitoring` on, the guard reads these records through the Graph audit log query API (v1.0) and records each finding as `usage_violation`, with the user, the number of interactions and when, plus an admin alert and an Azure Monitor rule.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `usage_monitoring` | `false` | Turn it on once the guard has the permission below. |
+| `usage_counts_as_violation` | `true` | A finding counts towards the [repeat-violation lock](#repeat-violations), at most once a day per agent, and not when a block was already counted within a day of the use. Reaching the limit blocks and locks the agent, even if it's no longer shared. |
+| `usage_record_types` | `["copilotInteraction"]` | Audit record types queried. |
+| `usage_agent_id_keys` | `["AgentId"]` | Where in a record's `auditData` the agent is named. An agent matches when its package id or manifest id appears in that value. |
+| `usage_lookback_hours` | `24` | How far back the first query reaches. |
+| `usage_overlap_minutes` | `120` | Each query also re-reads this much of the previous window, because audit records can arrive late. Records already seen are skipped. |
+| `usage_query_timeout_minutes` | `60` | A query that hasn't finished by then is dropped and started again. |
+
+The query is asynchronous: the guard creates it in one cycle and reads its results in a later one, so findings arrive with the audit log's own delay (minutes to hours). Use by an owner, by an exempt agent's users, or of an agent whose owner isn't known is never counted. When a group membership check fails, the use isn't counted either.
+
+Permission: the application permission `AuditLogsQuery.Read.All` on the guard's identity (`Grant-AbsgGraphPermissions.ps1 -UsageMonitoring`). Microsoft also documents narrower, per-service permissions; check which one your tenant needs in the pilot.
+
+### Edits undone between checks
+
+The guard remembers each agent's `lastModifiedDateTime` and a hash of its definition, name, description, sharing state and blocked state. If the time has moved but all of those read exactly as before, something was changed and changed back in between (or saved unchanged). That's recorded as `edit_between_checks`; for an approved agent, the admins and its governance contacts are also alerted.
+
+| `between_check_edits` | Effect |
+|---|---|
+| `report` (default) | Audit record; admin alert for approved agents |
+| `violation` | Also counts towards the repeat-violation lock, as `drift` for an approved agent and `sharing` otherwise |
+| `off` | Not checked |
+
+It shows that something changed, not what, and it relies on Microsoft updating `lastModifiedDateTime` for the changes that matter: check that in the pilot before using `violation`.
+
 ## Ownership and lifecycle
 
 ### Multiple owners
@@ -285,7 +319,7 @@ Every decision and action the guard takes is written to `audit_file` (default `a
 | Field | Meaning |
 |---|---|
 | `seq`, `timestamp` | Order and UTC time |
-| `event` | **Enforcement:** `block`, `reblock`, `unblock`, `block_deferred`, `exempt_skip`, `state_forget`, `circuit_breaker`, `error`, `no_action` (optional)<br>**Owners and email:** `owner_resolved`, `owner_unknown`, `welcome_baseline`, `welcome_email_sent`, `notice_email_sent`, `restored_email_sent`, `admin_alert_sent`, `email_failed`<br>**Repeat violations and daily limit:** `repeat_violation_locked`, `daily_share_limit_locked`, `unblock_withheld`, `lock_released`, `lock_release_rejected`, `lock_expired`<br>**Registry and drift:** `registry_entry_added`, `registry_entry_updated`, `registry_entry_removed`, `registry_entry_invalid`, `registry_validation`, `violation_updated`<br>**Acknowledgement:** `ack_received`, `ack_rejected`, `ack_stale`, `ack_closed`, `ack_escalated`, `sharing_removal`, `sharing_removal_unverified`<br>**Ownership and lifecycle:** `ownerless_detected`, `ownership_reassigned`, `ownership_email_sent`, `inactivity_warning`, `inactivity_reminder`, `inactivity_cleared`, `reactivation_requested` (retirements are `block` records with `blockType: retired`), `agent_archived`, `archive_failed`, `archived_email_sent`, `deletion_requested`, `deletion_reminder`, `deletion_submitted`, `deletion_failed`, `deletion_unverified`, `deletion_cancelled`, `agent_deleted`<br>**Daemon:** `daemon_start`, `daemon_stop`, `invocation_start`, `cycle_start`, `cycle_end`, `audit_integrity_failure` |
+| `event` | **Enforcement:** `block`, `reblock`, `unblock`, `block_deferred`, `exempt_skip`, `state_forget`, `circuit_breaker`, `error`, `no_action` (optional)<br>**Owners and email:** `owner_resolved`, `owner_unknown`, `welcome_baseline`, `welcome_email_sent`, `notice_email_sent`, `restored_email_sent`, `admin_alert_sent`, `email_failed`<br>**Between checks:** `usage_checked`, `usage_violation`, `edit_between_checks`<br>**Repeat violations and daily limit:** `repeat_violation_locked`, `daily_share_limit_locked`, `unblock_withheld`, `lock_released`, `lock_release_rejected`, `lock_expired`<br>**Registry and drift:** `registry_entry_added`, `registry_entry_updated`, `registry_entry_removed`, `registry_entry_invalid`, `registry_validation`, `violation_updated`<br>**Acknowledgement:** `ack_received`, `ack_rejected`, `ack_stale`, `ack_closed`, `ack_escalated`, `sharing_removal`, `sharing_removal_unverified`<br>**Ownership and lifecycle:** `ownerless_detected`, `ownership_reassigned`, `ownership_email_sent`, `inactivity_warning`, `inactivity_reminder`, `inactivity_cleared`, `reactivation_requested` (retirements are `block` records with `blockType: retired`), `agent_archived`, `archive_failed`, `archived_email_sent`, `deletion_requested`, `deletion_reminder`, `deletion_submitted`, `deletion_failed`, `deletion_unverified`, `deletion_cancelled`, `agent_deleted`<br>**Daemon:** `daemon_start`, `daemon_stop`, `invocation_start`, `cycle_start`, `cycle_end`, `audit_integrity_failure` |
 | `caseId` | Links every record about one block: block, notice, link token, acknowledgement, removal, unblock, restored email |
 | `onBehalfOf` | On `sharing_removal` and `unblock`: the owner the guard acted for |
 | `actingIdentity` | On `block`, `unblock`, `ownership_reassigned` and `sharing_removal`: who made the call (the delegated service account, or `application`) |
@@ -346,7 +380,8 @@ These behaviours aren't fully documented. Check each one in a test tenant or wit
 7. **`availableTo` values** for unshared Agent Builder agents (`some` / `none`). Confirm that `all` only appears for org-wide shares.
 8. **Owners and usage fields.** Check whether the package detail exposes owners (set `owner_fields`) and whether `lastUsedDateTime` is populated for Agent Builder agents before turning on `inactivity_days`. Check too whether a deleted (soft-deleted) agent disappears from the package list, which is how ShareGuard confirms a deletion.
 9. **Reassignment.** If you use `reassign_to_manager`, try `POST …/reassign` on a test agent with the delegated account first: like block and unblock, it runs as that account.
-10. **API versions and app-only writes.** Reads (list, get) use v1.0; block, unblock, update and reassign use `/beta`, the only version Microsoft documents them in. Microsoft's pages for these write methods list delegated permissions only, so expect 401 or 403 from the guard's app-only block and unblock calls. Check this first. If they're refused, enforcement can't work app-only until Microsoft adds application support. If your tenant only exposes the reads under `/beta` too, set `graph_base` to the beta URL. Beta isn't supported for production.
+10. **Usage records and edit times.** Before turning on `usage_monitoring`, look at a few `CopilotInteraction` records for a test Agent Builder agent (Purview audit search): check that `auditData` names the agent under `AgentId` (or set `usage_agent_id_keys`) and that its package id or manifest id appears there. Before using `between_check_edits: violation`, check that sharing an agent, and adding or removing a file, updates its `lastModifiedDateTime`.
+11. **API versions and app-only writes.** Reads (list, get) use v1.0; block, unblock, update and reassign use `/beta`, the only version Microsoft documents them in. Microsoft's pages for these write methods list delegated permissions only, so expect 401 or 403 from the guard's app-only block and unblock calls. Check this first. If they're refused, enforcement can't work app-only until Microsoft adds application support. If your tenant only exposes the reads under `/beta` too, set `graph_base` to the beta URL. Beta isn't supported for production.
 
 ## Known limitations and caveats
 
@@ -358,7 +393,7 @@ ShareGuard is a **detective** control built on preview APIs: it finds sharing an
 |---|---|---|
 | **Every share is usable for a while before it's blocked** | ShareGuard checks on a schedule; Microsoft offers no event when sharing changes. Each share stays usable for up to one polling interval plus Microsoft's propagation delay (measure it in the pilot). | A short `poll_interval_seconds` (guard schedule). The [repeat-violation lock](#repeat-violations) and the [daily limit](#daily-sharing-limit-per-owner) stop the window being reused, but the first exposures still happen. |
 | **Approved audiences can grow through group membership** | An approval names the groups an agent may be shared with, and ShareGuard checks the groups it's shared with, not who's in them. Whoever manages an approved group can add anyone to it, and the agent's audience grows with no change ShareGuard can see. ShareGuard doesn't control group membership. | Approve only groups that governance or IT owns, with membership changes reviewed (Entra access reviews, dynamic groups); keep audiences small; record each group's owners in the approval. |
-| **Changes between two checks are invisible** | An owner can add embedded files or a knowledge source, use it and undo it within one polling interval. | A short polling interval; Purview audit for agent edits; data-layer controls. |
+| **Changes between two checks can't be prevented** | An owner can add embedded files or a knowledge source, or share the agent, use it and undo it within one polling interval. | Detected afterwards, not prevented: [usage from the audit log](#usage-from-the-audit-log) shows who used an agent they weren't meant to, and [edits undone between checks](#edits-undone-between-checks) shows that something changed. Both arrive late, the second doesn't say what changed, and both rely on Microsoft's records being complete. A short polling interval and data-layer controls still matter. |
 | **The circuit breaker can hide shares** | When `max_blocks_per_cycle` (25) blocks have been issued in one cycle, the rest are deferred (`block_deferred`) to the next cycle, so a burst of shares can delay the block of one that matters. | The `circuit_breaker` alert; investigate every one. Lowering the limit would defer more agents, not fewer. |
 
 ### Limits of the repeat-violation and daily controls
