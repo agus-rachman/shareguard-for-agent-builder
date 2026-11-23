@@ -124,7 +124,7 @@ Three communication sites hold everything ShareGuard stores; one script creates 
      -OperationsSiteUrl https://<tenant>.sharepoint.com/sites/absg-operations `
      -RegistrySiteUrl   https://<tenant>.sharepoint.com/sites/absg-registry `
      -ArchiveSiteUrl    https://<tenant>.sharepoint.com/sites/absg-archive `
-     -FlowAccount svc-absg-flow@<domain>
+     -FlowAccount svc-absg-flow@<domain> -GovernanceGroup jane.risk@<domain>
    ```
 
 5. **Copy the printed site ids** into `operationsSiteId`, `registrySiteId` and `archiveSiteId` in the parameters file.
@@ -319,6 +319,8 @@ Turn enforcement on, then run the scenarios in order: each one starts from the s
 | 2 | Forward the notice to Rita; as Rita, submit the form | The *Agent Acknowledgements* item turns `Rejected`: *responder is not the owner the link was sent to*. The agent stays blocked. |
 | 3 | As Olivia, open the link and submit the form | Next cycle: the item turns `Accepted` then `Closed`; `sharing_removal` (success), then `unblock`. Olivia gets a *restored* email, and Agent Builder shows no sharing. If sharing is still there, record it: this checks Microsoft's undocumented `PATCH` behaviour. |
 | 4 | Share *Personal notes* with Rita, then remove the share yourself before confirming | `block`, then `unblock` with *sharing removed*. |
+| 4a | Repeat scenario 4 twice more (3 blocks in 30 days) | The third `block` also records `repeat_violation_locked`; Olivia gets a *locked* notice with no link, admins an alert. Removing the share now gives `unblock_withheld` and the agent stays blocked. |
+| 4b | As Jane, add an item to *Agent Lock Releases* (Operations site): `Title` = the package id, `Reason` | Next cycle: `lock_released` naming Jane, the item turns `Applied`, then `unblock`. Locally: `absg --config C:\absg\config.json --release-lock <package-id> --by jane.risk@<domain> --reason "Reviewed"`. |
 
 ### Approval, drift and revocation
 
@@ -550,6 +552,7 @@ Most first-run problems come from a missing permission or a value left out of th
 | The review flow never gets past *Do until* | The signer is still in dry run, can't write to the Registry site, or the `PackageId` is wrong | Check `ABSG_DRY_RUN` on the signer (Step 8), Step 4, and the request's `SignerComments`. |
 | Requests turn `Needs criteria`: *edited by …, who isn't a reviewer or the approval flow* | Someone outside `signerTrustedEditors` edited the request, or the signer's own updates appear under an id other than its client id | Look at the request's version history. If the name shown is the signer's identity, add the id it shows to `signerTrustedEditors` and redeploy. |
 | `Needs criteria`: *this request is already registered* | A registered request was approved again | Submit a new request to change or renew an approval. |
+| An agent stays blocked with `unblock_withheld` | It's locked after repeated violations | Release it through *Agent Lock Releases* (or `--release-lock` locally), after reviewing it with the owner. |
 | `enforcement_identity_failed`, or sharing removal fails: *Delegated sign-in missing or expired* | The refresh token expired or was revoked, or `svc-absg@` lost its admin role | Repeat Step 5, steps 2 to 6, and check the role. Nothing is blocked or released until it works. |
 | No emails arrive | Mailbox scope not granted, or Exchange still propagating | Re-run `Grant-AbsgMailbox.ps1`; allow time for the RBAC change to take effect. |
 | An agent stays blocked after sharing is removed | An admin blocked it (ShareGuard never touches those), or a failed cycle | Check `blocked_by_guard` in `state.json` and the `error` records in the audit. |

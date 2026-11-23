@@ -153,6 +153,7 @@ TEMPLATE_VARIABLES: dict[str, tuple[str, ...]] = {
                        "ack_button_html", "after_retirement_html"),
     "archived_notice": ("archived_on", "archive_reference", "deletion_html"),
     "ownership_transferred": ("previous_owner",),
+    "locked_notice": ("violation_count", "window_days"),
     "admin_alert": ("subject", "details_html"),
 }
 VARIANTS = {
@@ -215,6 +216,10 @@ DEFAULT_TEMPLATES: dict[str, tuple[str, str]] = {
 {{policy_link_html}}"""),
     "ownership_transferred": ("You now own the Copilot agent '{{agent_name}}'", _HI + """<p>You are now the owner of the Copilot agent <b>{{agent_name}}</b>. Its previous owner's account is no longer active, so ownership was passed to you as their manager.</p>
 <p>If the agent is still useful, review it and keep it up to date. If it isn't, delete it in Agent Builder. Shared agents need a governance approval naming you as an owner.</p>
+{{policy_link_html}}"""),
+    "locked_notice": ("Your Copilot agent '{{agent_name}}' is blocked until governance reviews it", _HI + """<p>Your Copilot agent <b>{{agent_name}}</b> has been blocked <b>{{violation_count}} times in the last {{window_days}} days</b> for breaking the sharing policy, so it is now <b>locked</b>.</p>
+<p>It stays blocked even after you remove the sharing or undo the change. There is no self-service link this time: the governance team will review it with you before it can be released.</p>
+<p>To start the review, contact {{helpdesk}}.</p>
 {{policy_link_html}}"""),
     "admin_alert": ("[{{brand_name}}] {{subject}}", "<p>{{subject}}</p><table>{{details_html}}</table>"),
 }
@@ -522,6 +527,11 @@ class Mailer:
         return self._send([self._address(user)], "ownership_transferred",
                           {**self._common(user, agent), "previous_owner": previous_owner})
 
+    def send_locked_notice(self, user: dict, agent: dict, violation_count: int, window_days: int) -> dict:
+        return self._send([self._address(user)], "locked_notice",
+                          {**self._common(user, agent), "violation_count": violation_count,
+                           "window_days": window_days})
+
     def send_admin_alert(self, subject: str, lines: dict[str, Any],
                          extra_recipients: list[str] | None = None) -> dict | None:
         to = list(dict.fromkeys(self.admin_emails + (extra_recipients or [])))
@@ -565,6 +575,7 @@ def preview_emails(mailer: Mailer, out_dir: str) -> list[str]:
                                    archive_after_days=30, deletion_mode="manual")
         mailer.send_archived_notice(user, agent, "2027/P_00000000", "manual")
         mailer.send_ownership_transferred(user, agent, "former-owner@example.com")
+        mailer.send_locked_notice(user, agent, 3, 30)
         mailer.send_admin_alert("Agent ready for deletion", {"Agent": "Sales Helper", "Next step": "Delete it"})
         os.makedirs(out_dir, exist_ok=True)
         written = []

@@ -137,10 +137,14 @@ def build(cfg: Config, role: str = "guard") -> Components:
     elif cfg.registry_file:
         registry = Registry(cfg.registry_file, public_key=public_key)
 
+    lock_releases = None
+    if cfg.storage_backend == "sharepoint":
+        from .sharepoint import SharePointLockReleases
+        lock_releases = SharePointLockReleases(ops_site, cfg.sharepoint_lock_releases_list)
     guard = Guard(cfg, graph, state, make_webhook_notifier(cfg.notify_webhook_url),
                   audit=audit, mailer=mailer, owner_resolver=resolver, signer=signer,
                   acks=acks, delegated_graph=delegated, registry=registry,
-                  archive=archive_store(cfg, graph, ops_site))
+                  archive=archive_store(cfg, graph, ops_site), lock_releases=lock_releases)
     return Components(cfg, graph, state, audit, guard, vault=vault, acks=acks, signer=signer,
                       ops_site=ops_site)
 

@@ -154,6 +154,25 @@ For every **shared** agent with a valid approval, each cycle:
 
 **Fail-safes:** if the registry file is corrupt or missing, the daemon keeps the last good copy and records an `error`, instead of treating every approval as withdrawn. The circuit breaker also limits blocks per cycle.
 
+## Repeat violations
+
+Removing sharing releases a blocked agent, so without a limit a maker could unshare, wait for the unblock, share again and use the agent until the next cycle, over and over. ShareGuard counts each block of the same agent, and the Nth one within the window **locks** it.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `repeat_violation_limit` | `3` | The block that locks the agent (3 = the third block in the window). `0` turns it off. |
+| `repeat_violation_window_days` | `30` | The window, in days: `1` for a day, `7` for a week, `30` for a month. Older blocks don't count. |
+| `repeat_violation_block_types` | `["sharing", "drift"]` | What counts: sharing without approval, and an approved agent breaking its approval. |
+
+A locked agent stays blocked even after the sharing or the change is undone, and every unblock is withheld (`unblock_withheld`, recorded once per reason). The owners get a *locked* notice with no self-service link, and an owner confirmation that arrives anyway is rejected. Admins and the agent's governance contacts get an alert, and an Azure Monitor rule fires on `repeat_violation_locked`.
+
+Only governance can release it:
+
+- **Azure (SharePoint storage):** add an item to *Agent Lock Releases* on the Operations site, with `Title` = the package id and a `Reason`. Only the group given to `Provision-AbsgSharePoint.ps1 -GovernanceGroup` can write there. SharePoint records who created the item.
+- **Local files:** `absg --config config.json --release-lock <package id> --by <your UPN> --reason "<text>"`. `absg --config config.json --list-locked` lists the locked agents.
+
+On its next cycle the guard applies a release made after the lock: it records `lock_released` with who released it and why, clears the agent's violation count, and then applies the normal policy (unblocked if it's no longer shared; still blocked, with a self-service link, if it is). A release from one of the agent's own owners, or one made before the lock, is refused (`lock_release_rejected`, or ignored). If an admin unblocks a locked agent by hand, that counts as a release, but its violation count is kept, so its next violation locks it again at once.
+
 ## Ownership and lifecycle
 
 ### Multiple owners
@@ -244,6 +263,7 @@ Set `notify_webhook_url` to a Teams Workflows or Logic App HTTP trigger to recei
 
 - **Dry run** (`--dry-run` / `ABSG_DRY_RUN=1`): logs and audits what would happen (outcome `simulated`), but blocks, unblocks, edits and emails nothing.
 - **Circuit breaker** (`max_blocks_per_cycle`): stops issuing new blocks after N in one pass and raises a `circuit_breaker` event, in case an API change makes every agent look shared.
+- **Repeat-violation lock** (`repeat_violation_limit`): an agent blocked again and again in a short time stays blocked until governance releases it. See [Repeat violations](#repeat-violations).
 - Errors on one agent are logged, and the rest of the scan carries on. Throttling (429) and 5xx responses are retried, honouring `Retry-After`.
 
 ## Audit trail
@@ -255,7 +275,7 @@ Every decision and action the guard takes is written to `audit_file` (default `a
 | Field | Meaning |
 |---|---|
 | `seq`, `timestamp` | Order and UTC time |
-| `event` | **Enforcement:** `block`, `reblock`, `unblock`, `block_deferred`, `exempt_skip`, `state_forget`, `circuit_breaker`, `error`, `no_action` (optional)<br>**Owners and email:** `owner_resolved`, `owner_unknown`, `welcome_baseline`, `welcome_email_sent`, `notice_email_sent`, `restored_email_sent`, `admin_alert_sent`, `email_failed`<br>**Registry and drift:** `registry_entry_added`, `registry_entry_updated`, `registry_entry_removed`, `registry_entry_invalid`, `registry_validation`, `violation_updated`<br>**Acknowledgement:** `ack_received`, `ack_rejected`, `ack_stale`, `ack_closed`, `ack_escalated`, `sharing_removal`, `sharing_removal_unverified`<br>**Ownership and lifecycle:** `ownerless_detected`, `ownership_reassigned`, `ownership_email_sent`, `inactivity_warning`, `inactivity_reminder`, `inactivity_cleared`, `reactivation_requested` (retirements are `block` records with `blockType: retired`), `agent_archived`, `archive_failed`, `archived_email_sent`, `deletion_requested`, `deletion_reminder`, `deletion_submitted`, `deletion_failed`, `deletion_unverified`, `deletion_cancelled`, `agent_deleted`<br>**Daemon:** `daemon_start`, `daemon_stop`, `invocation_start`, `cycle_start`, `cycle_end`, `audit_integrity_failure` |
+| `event` | **Enforcement:** `block`, `reblock`, `unblock`, `block_deferred`, `exempt_skip`, `state_forget`, `circuit_breaker`, `error`, `no_action` (optional)<br>**Owners and email:** `owner_resolved`, `owner_unknown`, `welcome_baseline`, `welcome_email_sent`, `notice_email_sent`, `restored_email_sent`, `admin_alert_sent`, `email_failed`<br>**Repeat violations:** `repeat_violation_locked`, `unblock_withheld`, `lock_released`, `lock_release_rejected`<br>**Registry and drift:** `registry_entry_added`, `registry_entry_updated`, `registry_entry_removed`, `registry_entry_invalid`, `registry_validation`, `violation_updated`<br>**Acknowledgement:** `ack_received`, `ack_rejected`, `ack_stale`, `ack_closed`, `ack_escalated`, `sharing_removal`, `sharing_removal_unverified`<br>**Ownership and lifecycle:** `ownerless_detected`, `ownership_reassigned`, `ownership_email_sent`, `inactivity_warning`, `inactivity_reminder`, `inactivity_cleared`, `reactivation_requested` (retirements are `block` records with `blockType: retired`), `agent_archived`, `archive_failed`, `archived_email_sent`, `deletion_requested`, `deletion_reminder`, `deletion_submitted`, `deletion_failed`, `deletion_unverified`, `deletion_cancelled`, `agent_deleted`<br>**Daemon:** `daemon_start`, `daemon_stop`, `invocation_start`, `cycle_start`, `cycle_end`, `audit_integrity_failure` |
 | `caseId` | Links every record about one block: block, notice, link token, acknowledgement, removal, unblock, restored email |
 | `onBehalfOf` | On `sharing_removal` and `unblock`: the owner the guard acted for |
 | `actingIdentity` | On `block`, `unblock`, `ownership_reassigned` and `sharing_removal`: who made the call (the delegated service account, or `application`) |

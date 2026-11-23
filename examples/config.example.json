@@ -14,6 +14,10 @@
   "ignore_principal_ids": [],
   "treat_available_to_all_as_shared": true,
   "max_blocks_per_cycle": 25,
+  "repeat_violation_limit": 3,
+  "repeat_violation_window_days": 30,
+  "repeat_violation_block_types": ["sharing", "drift"],
+  "lock_releases_file": "/data/absg_lock_releases.json",
   "notify_webhook_url": null,
   "mail_sender": "shareguard@contoso.com",
   "admin_emails": [

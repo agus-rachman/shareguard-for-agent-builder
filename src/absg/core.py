@@ -101,6 +101,19 @@ class Config:
     ignore_principal_ids: list[str] = field(default_factory=list)
     # Treat availableTo == "all" as shared even when the share list is empty.
     treat_available_to_all_as_shared: bool = True
+    # Repeat violations: the Nth block of the same agent within the window locks it.
+    # A locked agent stays blocked even after the sharing (or drift) is undone, and no
+    # self-service link is offered: only a governance release (lock_releases) frees it.
+    # 0 = off. The window is in days (1 = a day, 7 = a week, 30 = a month).
+    repeat_violation_limit: int = 3
+    repeat_violation_window_days: int = 30
+    # Which blocks count: "sharing" (shared without approval) and/or "drift" (an
+    # approved agent that broke its approval).
+    repeat_violation_block_types: list[str] = field(default_factory=lambda: ["sharing", "drift"])
+    # Governance releases of locked agents: a local JSON file (storage_backend "file",
+    # written by `absg --release-lock`), or a list on the operations site ("sharepoint").
+    lock_releases_file: str = "absg_lock_releases.json"
+    sharepoint_lock_releases_list: str = "Agent Lock Releases"
     # Circuit breaker: stop blocking after this many new blocks in one pass.
     # Protects against an API behaviour change causing a mass block.
     max_blocks_per_cycle: int = 25
@@ -298,6 +311,10 @@ class Config:
             raise ValueError("inactivity_reminder_days must be 0 or less than inactivity_notice_days")
         if cfg.archive_after_days is not None and cfg.archive_after_days < 0:
             raise ValueError("archive_after_days must be 0 or more (or null to never archive)")
+        if cfg.repeat_violation_limit < 0 or cfg.repeat_violation_window_days < 1:
+            raise ValueError("repeat_violation_limit must be 0 or more, repeat_violation_window_days 1 or more")
+        if not set(cfg.repeat_violation_block_types) <= {"sharing", "drift"}:
+            raise ValueError("repeat_violation_block_types may only contain sharing and drift")
         if cfg.block_identity not in ("delegated", "application"):
             raise ValueError("block_identity must be delegated or application")
         if cfg.deletion_mode not in ("manual", "api", "none"):
@@ -487,6 +504,8 @@ class StateStore:
         self.registry_snapshot: dict | None = None
         # Audit records a remote backend couldn't write; written first next time.
         self.pending_audit: list[dict] = []
+        # packageId -> times it was blocked for a counted violation (repeat-violation lock)
+        self.violation_history: dict[str, list[str]] = {}
         raw = self.backend.load()
         if raw is not None:
             self.data = raw.get("blocked_by_guard", {})
@@ -501,6 +520,7 @@ class StateStore:
             self.lifecycle = raw.get("lifecycle", {})
             self.registry_snapshot = raw.get("registry_snapshot")
             self.pending_audit = raw.get("pending_audit", [])
+            self.violation_history = raw.get("violation_history", {})
 
     def is_ours(self, package_id: str) -> bool:
         return package_id in self.data
@@ -526,7 +546,8 @@ class StateStore:
                        "registry_newest": self.registry_newest,
                        "lifecycle": self.lifecycle,
                        "registry_snapshot": self.registry_snapshot,
-                       "pending_audit": self.pending_audit})
+                       "pending_audit": self.pending_audit,
+                       "violation_history": self.violation_history})
 
 
 # --------------------------------------------------------------------------
@@ -722,6 +743,39 @@ def is_exempt(detail: dict, cfg: Config) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Governance releases of locked agents
+# --------------------------------------------------------------------------
+class FileLockReleases:
+    """``{"releases": [{"packageId", "releasedBy", "reason", "requestedAt"}, ...]}`` in a
+    local file, appended to by ``absg --release-lock``. Read-only for the guard: a release
+    applies to a lock only when it was requested after the lock."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def fetch(self) -> list[dict]:
+        if not os.path.exists(self.path):
+            return []
+        with open(self.path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [dict(r, ref=f"file:{i}") for i, r in enumerate(data.get("releases", []))]
+
+    def mark(self, release: dict, status: str, note: str = "") -> None:
+        return None
+
+    def add(self, package_id: str, released_by: str, reason: str) -> dict:
+        data = {"releases": []}
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        rec = {"packageId": package_id, "releasedBy": released_by, "reason": reason,
+               "requestedAt": datetime.now(timezone.utc).isoformat()}
+        data.setdefault("releases", []).append(rec)
+        FileJsonDocument(self.path).save(data)
+        return rec
+
+
+# --------------------------------------------------------------------------
 # Reconciler
 # --------------------------------------------------------------------------
 @dataclass
@@ -766,7 +820,8 @@ class Guard:
                  acks: Any = None,
                  delegated_graph: GraphClient | None = None,
                  registry: Any = None,
-                 archive: Any = None):
+                 archive: Any = None,
+                 lock_releases: Any = None):
         self.cfg = cfg
         self.graph = graph
         self.state = state
@@ -793,6 +848,10 @@ class Guard:
             from .archive import FileArchiveStore
             archive = FileArchiveStore(cfg.archive_dir)
         self.archive = archive
+        if lock_releases is None and cfg.storage_backend == "file":
+            lock_releases = FileLockReleases(cfg.lock_releases_file)
+        self.lock_releases = lock_releases
+        self._releases: dict[str, list[dict]] = {}
         self._registry_file_hash: str | None = None
         self._cycle_id: str | None = None
         self._baselined = 0
@@ -862,6 +921,7 @@ class Guard:
 
     def _run_cycle(self, result: CycleResult, seen: set[str], new_blocks: int) -> CycleResult:
         self._sync_registry()
+        self._load_lock_releases()
         if self.acks is not None and hasattr(self.acks, "refresh"):
             try:
                 self.acks.refresh(self._audit_ack)
@@ -1018,6 +1078,9 @@ class Guard:
         for o in owners:
             self._maybe_welcome(d, o, result)
 
+        if ours and self.state.data[pid].get("locked"):
+            self._apply_lock_release(d, owners)
+
         if shared and is_exempt(d, self.cfg):
             result.skipped_exempt.append(pid)
             self._audit("exempt_skip", d, before=before, recipients=recipients,
@@ -1085,6 +1148,11 @@ class Guard:
         if not blocked and ours and not shared:
             # Someone unblocked it manually and it is no longer shared.
             entry = self.state.data.get(pid, {})
+            if entry.get("locked"):
+                # Only an admin can unblock: treat it as a release, but keep the violation
+                # history, so the next violation locks the agent again straight away.
+                self._audit("lock_released", d, caseId=entry.get("caseId"), releasedBy="admin (manual unblock)",
+                            reason="a locked agent was unblocked outside the guard; its violation history is kept")
             self._audit("state_forget", d, before=before, caseId=entry.get("caseId"),
                         reason="unblocked outside the guard and no longer shared",
                         outcome="success")
@@ -1303,6 +1371,7 @@ class Guard:
                 **(state_extra or {}),
             })
             self._save_state()      # record it now: a later crash mustn't orphan the block
+        lock = self._register_violation(pid, block_type)
         self._audit(event, d, before=before,
                     after=self._snapshot(not self.cfg.dry_run, recipients),
                     recipients=recipients, reason=reason, caseId=case_id, ownerId=owner,
@@ -1311,6 +1380,7 @@ class Guard:
                     approvalStatus=approval_status,
                     configHash=evaluation.config_hash if evaluation else None,
                     actingIdentity=self.blocker_identity,
+                    violationCount=lock["count"] if lock else None,
                     outcome="simulated" if self.cfg.dry_run else "success", **(extra or {}))
         (result.reblocked if ours else result.blocked).append(pid)
         if block_type == "drift":
@@ -1321,8 +1391,112 @@ class Guard:
                                 "sharedWith": recipients, "reblock": ours,
                                 "blockType": block_type, "violations": violations,
                                 "caseId": case_id, "dryRun": self.cfg.dry_run})
-        self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
+        if lock and lock["locked"]:
+            self._lock(d, case_id, owners, recipients, block_type, lock, approval_entry)
+        else:
+            self._send_notice(d, owners, recipients, case_id, block_type, violations, approval_entry)
         return 1
+
+    # -- repeat violations ----------------------------------------------------
+    def _register_violation(self, pid: str, block_type: str) -> dict | None:
+        """Count this block towards the repeat-violation limit (within the window)."""
+        limit = self.cfg.repeat_violation_limit
+        if not limit or block_type not in self.cfg.repeat_violation_block_types:
+            return None
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=self.cfg.repeat_violation_window_days)
+        history = [t for t in self.state.violation_history.get(pid, [])
+                   if (self._parse_time(t) or now) >= since] + [now.isoformat()]
+        if not self.cfg.dry_run:
+            self.state.violation_history[pid] = history
+        return {"count": len(history), "locked": len(history) >= limit, "history": history}
+
+    def _lock(self, d: dict, case_id: str, owners: list[str], recipients: list[dict], block_type: str,
+              lock: dict, approval_entry: dict | None) -> None:
+        pid = d["id"]
+        days = self.cfg.repeat_violation_window_days
+        reason = (f"blocked {lock['count']} times in {days} days (limit {self.cfg.repeat_violation_limit}): "
+                  "stays blocked until governance releases it")
+        if not self.cfg.dry_run and self.state.is_ours(pid):
+            self.state.data[pid].update({"locked": True, "lockedAt": datetime.now(timezone.utc).isoformat(),
+                                         "lockReason": reason, "violationTimes": lock["history"]})
+            self._save_state()
+        self._audit("repeat_violation_locked", d, caseId=case_id, blockType=block_type,
+                    violationCount=lock["count"], windowDays=days, violationTimes=lock["history"],
+                    ownerIds=owners, reason=reason, outcome="simulated" if self.cfg.dry_run else "success")
+        self.notify("repeat_violation_locked", {"packageId": pid, "displayName": d.get("displayName"),
+                                                "violations": lock["count"], "windowDays": days,
+                                                "dryRun": self.cfg.dry_run})
+        self._admin_alert(d, case_id, "Agent locked after repeated violations", {
+            "Owners": ", ".join(owners) or "unknown", "Violations": f"{lock['count']} in {days} days",
+            "Block type": block_type, "Recipients": len(recipients),
+            "Next step": ("Review it with the owner. To release it, add an item for this package ID to "
+                          f"'{self.cfg.sharepoint_lock_releases_list}'" if self.cfg.storage_backend == "sharepoint"
+                          else "Review it with the owner. To release it: absg --release-lock <package ID> "
+                               "--by <your UPN> --reason <text>")},
+            extra=(approval_entry or {}).get("governanceContacts") or [])
+        if self._mail_on:
+            for o in owners:
+                try:
+                    meta = self.mailer.send_locked_notice(self.mailer.get_user(o), d, lock["count"], days)
+                    self._audit("notice_email_sent", d, caseId=case_id, ownerId=o, email=meta,
+                                blockType=block_type, locked=True, ackLinkIssued=False,
+                                outcome="simulated" if meta.get("simulated") else "success")
+                except Exception as exc:
+                    self._audit("email_failed", d, template="locked_notice", caseId=case_id, ownerId=o,
+                                error=str(exc), outcome="failed")
+
+    def _is_owner(self, who: str, who_id: Any, owners: list[str]) -> bool:
+        """True when a releaser is one of the agent's owners (by object id, or by address)."""
+        ids = {str(o).lower() for o in owners}
+        if who.lower() in ids or (who_id and str(who_id).lower() in ids):
+            return True
+        if self.mailer is not None and getattr(self.mailer, "graph", None) is not None:
+            for o in owners:
+                try:
+                    u = self.mailer.get_user(o)
+                except Exception as exc:       # a deleted owner can't be looked up
+                    log.debug("Owner %s lookup failed: %s", o, exc)
+                    continue
+                if who.lower() in {str(u.get(k) or "").lower() for k in ("mail", "userPrincipalName")}:
+                    return True
+        return False
+
+    def _load_lock_releases(self) -> None:
+        self._releases = {}
+        if self.lock_releases is None or not any(e.get("locked") for e in self.state.data.values()):
+            return
+        try:
+            for r in self.lock_releases.fetch():
+                self._releases.setdefault(str(r.get("packageId") or ""), []).append(r)
+        except Exception as exc:
+            self._audit("error", stage="lock_releases", error=str(exc),
+                        reason="governance releases could not be read; locked agents stay locked")
+
+    def _apply_lock_release(self, d: dict, owners: list[str]) -> bool:
+        """Release a locked agent when governance asked for it after the lock."""
+        pid = d["id"]
+        entry = self.state.data[pid]
+        locked_at = self._parse_time(entry.get("lockedAt"))
+        for r in self._releases.get(pid, []):
+            at = self._parse_time(r.get("requestedAt"))
+            if locked_at and (at is None or at <= locked_at):
+                continue                       # older than this lock
+            by = str(r.get("releasedBy") or "").strip()
+            if not by or self._is_owner(by, r.get("releasedById"), owners or entry.get("ownerIds") or []):
+                self._audit("lock_release_rejected", d, releasedBy=by or None, ref=r.get("ref"),
+                            reason="a release must name who released it, and an owner can't release their own agent")
+                self.lock_releases.mark(r, "Rejected", "an owner can't release their own agent")
+                continue
+            for k in ("locked", "lockedAt", "lockReason", "violationTimes", "unblockWithheld"):
+                entry.pop(k, None)
+            self.state.violation_history.pop(pid, None)
+            self._audit("lock_released", d, caseId=entry.get("caseId"), releasedBy=by, ref=r.get("ref"),
+                        reason=r.get("reason") or "released by governance", requestedAt=r.get("requestedAt"))
+            self.lock_releases.mark(r, "Applied")
+            return True
+        return False
+
 
     def _alert_write_auth(self, d: dict, exc: GraphError) -> None:
         """Once a cycle: the blocking identity was refused (sign-in expired, missing role,
@@ -1442,6 +1616,11 @@ class Guard:
         entry = self.state.data.get(pid, {})
         for ack in self.acks.pending_for_package(pid):
             case_id = ack["caseId"]
+            if entry.get("locked"):
+                self._audit("ack_rejected", d, caseId=case_id, ownerId=ack.get("ownerId"),
+                            reason="agent is locked after repeated violations; governance must release it")
+                self.acks.close(case_id)
+                continue
             if case_id != entry.get("caseId"):
                 self._audit("ack_stale", d, caseId=case_id, currentCaseId=entry.get("caseId"),
                             reason="acknowledgement is for an earlier block")
@@ -1950,6 +2129,14 @@ class Guard:
                  on_behalf_of: str | None = None) -> None:
         pid, name = d["id"], d.get("displayName", "")
         entry = self.state.data.get(pid, {})
+        if entry.get("locked"):
+            # Locked after repeated violations: only a governance release lifts it.
+            if entry.get("unblockWithheld") != reason:
+                entry["unblockWithheld"] = reason
+                self._audit("unblock_withheld", d, caseId=entry.get("caseId"), lockedAt=entry.get("lockedAt"),
+                            reason=f"{reason}, but the agent is locked after repeated violations: "
+                                   "it stays blocked until governance releases it")
+            return
         case_id = case_id or entry.get("caseId")
         owner = entry.get("ownerId") or self.state.package_owners.get(pid)
         before = self._snapshot(bool(d.get("isBlocked", True)), recipients)
@@ -2128,6 +2315,34 @@ def registry_report(cfg: Config, draft_package_id: str | None) -> int:
     return 0 if failing == 0 else 3
 
 
+def lock_command(cfg: Config, args: Any) -> int:
+    """--list-locked and --release-lock for the local (file) deployment. With SharePoint
+    storage, governance adds an item to the lock releases list instead."""
+    if cfg.storage_backend != "file":
+        print(f"With SharePoint storage, release a lock by adding an item (Title = package id, Reason) to "
+              f"'{cfg.sharepoint_lock_releases_list}' on the operations site; locked agents are in "
+              "state.json in the state library (blocked_by_guard, locked: true).")
+        return 1
+    state = StateStore(cfg.state_file)
+    locked = {pid: e for pid, e in state.data.items() if e.get("locked")}
+    if args.list_locked:
+        for pid, e in sorted(locked.items()):
+            print(json.dumps({"packageId": pid, "displayName": e.get("displayName"), "lockedAt": e.get("lockedAt"),
+                              "reason": e.get("lockReason"), "owners": e.get("ownerIds")}))
+        if not locked:
+            print("No locked agents.")
+        return 0
+    if not (args.by and args.reason):
+        print("--release-lock needs --by <your UPN> and --reason <text>")
+        return 1
+    if args.release_lock not in locked:
+        print(f"{args.release_lock} isn't locked (see --list-locked)")
+        return 1
+    rec = FileLockReleases(cfg.lock_releases_file).add(args.release_lock, args.by, args.reason)
+    print(f"Release recorded at {rec['requestedAt']}; the guard applies it on its next cycle.")
+    return 0
+
+
 def email_template_command(args: Any) -> int:
     from .mail import Mailer, TemplateError, export_templates, load_template_dir, preview_emails
     if args.export_email_templates:
@@ -2187,6 +2402,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                      help="Print an RSA key (PEM) as a JWK and exit")
     reg.add_argument("--registry-validate", action="store_true",
                      help="Validate every registry entry against the live agents, print a report, exit")
+    lock_cmds = parser.add_argument_group("repeat-violation locks (governance; local files)")
+    lock_cmds.add_argument("--list-locked", action="store_true",
+                           help="List agents locked after repeated violations and exit")
+    lock_cmds.add_argument("--release-lock", metavar="PACKAGE_ID",
+                           help="Release a locked agent (needs --by and --reason); applied on the next cycle")
+    lock_cmds.add_argument("--by", metavar="UPN", help="Who is releasing the lock (for --release-lock)")
+    lock_cmds.add_argument("--reason", help="Why the lock is released (for --release-lock)")
     audit_cmds = parser.add_argument_group("audit commands (do not contact Graph)")
     audit_cmds.add_argument("--verify-audit", metavar="AUDIT_FILE",
                             help="Verify the audit file's hash chain and exit (1 if broken)")
@@ -2264,6 +2486,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         v = verify_audit(cfg)
         print(json.dumps(v))
         return 0 if v["ok"] else 1
+    if args.list_locked or args.release_lock:
+        return lock_command(cfg, args)
     if args.login_delegated:
         if not cfg.delegated_client_id:
             print("Set delegated_client_id in the config first.")

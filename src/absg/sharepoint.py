@@ -11,6 +11,8 @@ Used by the Azure deployment so that all of the guard's data stays in Microsoft 
                                  per UTC day; the chain carries on across files, and
                                  closed days can be given a retention (record) label.
 * ``SharePointRegistrySource`` - signed registry entries from the *Approved Agents* list.
+* ``SharePointLockReleases``   - governance releases of agents locked after repeated
+                                 violations, from a list only governance can write.
 * ``SharePointAckStore``       - owner acknowledgements written to a list by a
                                  Microsoft Forms + Power Automate flow; the guard
                                  checks each one before acting on it.
@@ -317,6 +319,32 @@ class SharePointRegistrySource:
                 agents.append((fields.get("Title") or f"item-{item.get('id')}", None))
         digest = hashlib.sha256("\n".join(sorted(raw)).encode()).hexdigest()
         return agents, digest
+
+
+# ------------------------------------------------------------------------------ lock releases
+class SharePointLockReleases:
+    """Releases of locked agents from the *Agent Lock Releases* list on the operations site.
+
+    Governance adds an item: ``Title`` = the package id, ``Reason``. SharePoint records who
+    created it, which the guard audits as ``releasedBy`` (an agent's own owner is refused).
+    The guard marks each item it uses ``Applied`` or ``Rejected``."""
+
+    def __init__(self, site: SharePointSite, list_name: str = "Agent Lock Releases"):
+        self.site, self.list_name = site, list_name
+
+    def fetch(self) -> list[dict]:
+        out = []
+        for item in self.site.list_items(self.list_name, "fields/Status eq 'New'"):
+            f = item.get("fields") or {}
+            by = (item.get("createdBy") or {}).get("user") or {}
+            out.append({"packageId": (f.get("Title") or "").strip(),
+                        "releasedBy": by.get("email") or by.get("displayName") or "",
+                        "releasedById": by.get("id"), "reason": f.get("Reason") or "",
+                        "requestedAt": item.get("createdDateTime") or f.get("Created"), "ref": item.get("id")})
+        return out
+
+    def mark(self, release: dict, status: str, note: str = "") -> None:
+        self.site.update_fields(self.list_name, release["ref"], {"Status": status, "StatusReason": note})
 
 
 # ------------------------------------------------------------------------------ acknowledgements

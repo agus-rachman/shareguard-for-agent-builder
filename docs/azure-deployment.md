@@ -44,10 +44,10 @@ $p = '~/absg/main.parameters.prod.json'
   -OperationsSiteUrl https://contoso.sharepoint.com/sites/absg-operations `
   -RegistrySiteUrl   https://contoso.sharepoint.com/sites/absg-registry `
   -ArchiveSiteUrl    https://contoso.sharepoint.com/sites/absg-archive `
-  -FlowAccount svc-absg-flow@contoso.com
+  -FlowAccount svc-absg-flow@contoso.com -GovernanceGroup ai-governance@contoso.com
 ```
 
-It prints `operationsSiteId`, `registrySiteId` and `archiveSiteId`: put them in the parameters file. Then, in Purview, create **retention labels** for the audit (for example "ShareGuard audit record") and for the archive (for example "ShareGuard retired agent"), each a record label with your retention period. Publish them to the Operations and archive sites, and put their names in `auditRetentionLabel` and `lifecycle.archive_retention_label`. ShareGuard applies the audit label to each day's file once the day is closed, and the archive label to every archived file.
+`-GovernanceGroup` (an Entra group or user) may write *Agent Lock Releases* on the Operations site: it releases agents locked after repeated violations. It prints `operationsSiteId`, `registrySiteId` and `archiveSiteId`: put them in the parameters file. Then, in Purview, create **retention labels** for the audit (for example "ShareGuard audit record") and for the archive (for example "ShareGuard retired agent"), each a record label with your retention period. Publish them to the Operations and archive sites, and put their names in `auditRetentionLabel` and `lifecycle.archive_retention_label`. ShareGuard applies the audit label to each day's file once the day is closed, and the archive label to every archived file.
 
 ## Step 2: Infrastructure and code
 
@@ -164,4 +164,5 @@ To customise email wording, put template files in the `templates` folder of the 
 | Pause enforcement | Set `ABSG_DRY_RUN=1` on the guard app |
 | Rotate the acknowledgement key | Set a new version of the `ack-token-hmac-key` secret; outstanding links stop working, owners get new ones with the next notice |
 | Rotate the registry key | Every entry must be re-signed with the new key version. The signer refuses to approve a registered request again, so submit a new request for each approved agent. The guard and signer use the new version as soon as it exists, and until an agent's new entry is signed its old one doesn't verify, so the agent is treated as unapproved. Rotate in a maintenance window with the guard in dry run (`ABSG_DRY_RUN=1`), and end dry run once every agent is registered again. |
+| Release an agent locked after repeated violations | Add an item to *Agent Lock Releases* (Operations site): `Title` = the package id, `Reason`. Applied on the next cycle (`lock_released`). See [Repeat violations](operations-guide.md#repeat-violations). |
 | Release a stuck agent | Fix the cause (remove sharing, revert drift, approve); the guard unblocks on its next cycle. Never unblock a guard block by hand: the guard re-blocks it. |
